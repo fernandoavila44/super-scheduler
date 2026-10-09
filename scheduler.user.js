@@ -1,19 +1,19 @@
 // ==UserScript==
-// @name         DIAN - Monitor de citas
-// @namespace    devoluciones
-// @version      1.3
-// @description  Recorre el flujo de agendamiento y avisa cuando hay cita disponible
+// @name         Super Scheduler
+// @namespace    super-scheduler
+// @version      1.4
+// @description  Appointment scheduling monitor
 // @match        https://agendamiento.dian.gov.co/*
 // @run-at       document-idle
 // @grant        GM_xmlhttpRequest
 // @grant        unsafeWindow
 // @connect      script.google.com
 // @connect      script.googleusercontent.com
-// @downloadURL  https://raw.githubusercontent.com/fernandoavila44/super-scheduler/master/dian-monitor-citas.user.js
-// @updateURL    https://raw.githubusercontent.com/fernandoavila44/super-scheduler/master/dian-monitor-citas.user.js
+// @downloadURL  https://raw.githubusercontent.com/fernandoavila44/super-scheduler/master/scheduler.user.js
+// @updateURL    https://raw.githubusercontent.com/fernandoavila44/super-scheduler/master/scheduler.user.js
 // ==/UserScript==
 //
-// master = versión oficial. Pruebas en la rama sandbox.
+// master = oficial. sandbox = pruebas.
 //
 
 (function () {
@@ -30,9 +30,8 @@
         // Player.aspx redirige a Default.aspx?Error=3; el recurso real es este.
         urlInicio: 'https://agendamiento.dian.gov.co',
 
-        // Lista remota de clientes. La URL /exec NO va aquí (repo público): se guarda
-        // en localStorage con el botón "Sheet URL" del panel, o en la clave
-        // dianMonitorSheetUrl. Ver dian-clientes-apps-script.gs.
+        // URL /exec del API remoto: no va en el repo. Se guarda en localStorage
+        // con el botón "Sheet URL" del panel (clave ssSheetUrl). Ver clientes-api.gs.
         sheet: {
             activo: true,
             url: '',
@@ -42,12 +41,9 @@
         intervaloMinutos: 1,
 
         // Tras agendar, si quedan clientes, espera esto y vuelve a empezar.
-        // Corto a propósito: la cola no tiene por qué esperar el ciclo de sondeo.
         segundosAntesDelSiguienteCliente: 8,
 
-        // Tiempo máximo de espera a que aparezca cada elemento antes de abortar el ciclo.
-        // La DIAN a veces tarda mucho en pintar controles; 45 s evita abortar el ciclo
-        // por lentitud antes de que el elemento llegue.
+        // Margen alto: el sitio a veces tarda en pintar controles.
         timeoutElementoMs: 45000,
 
         // Pausa por defecto después de cada paso, si el paso no define "espera".
@@ -183,9 +179,9 @@
     // ─────────────────────────── ESTADO PERSISTENTE ───────────────────────────
     // Vive en localStorage porque el flujo recarga la página en cada ciclo.
 
-    const CLAVE = 'dianMonitorCitas';
-    const CLAVE_CLIENTES = 'dianMonitorClientes';
-    const CLAVE_SHEET_URL = 'dianMonitorSheetUrl';
+    const CLAVE = 'ssMonitorState';
+    const CLAVE_CLIENTES = 'ssMonitorClientes';
+    const CLAVE_SHEET_URL = 'ssSheetUrl';
     const INTERVALO_MS = CONFIG.intervaloMinutos * 60 * 1000;
 
     // URL del Apps Script: CONFIG.sheet.url (vacío en git) o localStorage local.
@@ -384,7 +380,7 @@
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = `citas-dian-${new Date().toISOString().slice(0, 10)}.json`;
+        a.download = `citas-${new Date().toISOString().slice(0, 10)}.json`;
         a.click();
         URL.revokeObjectURL(url);
         pintar(`Exportadas ${agendados.length} cita(s).`);
@@ -552,7 +548,7 @@
     async function esperarCaptcha() {
         const { selToken, timeoutMs } = CONFIG.captcha;
 
-        detener('¡HAY CITA! Marca el captcha y el script sigue solo.');
+        detener('¡CUPOS! Marca el captcha y el script sigue solo.');
 
         const limite = Date.now() + timeoutMs;
         while (Date.now() < limite) {
@@ -844,14 +840,14 @@
         }
 
         if (window.Notification && Notification.permission === 'granted') {
-            new Notification('DIAN: hay cita disponible', { body: cuerpo });
+            new Notification('Cupo disponible', { body: cuerpo });
         }
 
         const original = document.title;
         let on = false;
         temporizadores.push(
             setInterval(() => {
-                document.title = (on = !on) ? '*** HAY CITA ***' : original;
+                document.title = (on = !on) ? '*** CUPOS ***' : original;
             }, 800),
         );
 
@@ -934,7 +930,7 @@
     let refrescarBoton = () => {};
 
     function log(msg) {
-        console.log('[DIAN monitor]', msg);
+        console.log('[scheduler]', msg);
     }
 
     function pintar(texto, exito = false) {
@@ -951,7 +947,7 @@
             'border-radius:8px;padding:10px 12px;font:12px/1.4 system-ui,sans-serif;box-shadow:0 2px 10px rgba(0,0,0,.25);max-width:280px';
 
         const titulo = document.createElement('strong');
-        titulo.textContent = 'Monitor de citas DIAN';
+        titulo.textContent = 'Super Scheduler';
 
         $estado = document.createElement('div');
         $estado.style.margin = '6px 0';

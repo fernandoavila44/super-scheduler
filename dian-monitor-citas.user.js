@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DIAN - Monitor de citas (sandbox)
 // @namespace    devoluciones
-// @version      1.2-sandbox
+// @version      1.3-sandbox
 // @description  [SANDBOX] Pruebas del monitor de citas DIAN
 // @match        https://agendamiento.dian.gov.co/*
 // @run-at       document-idle
@@ -21,36 +21,21 @@
 
     // ───────────────────────────── CONFIGURACIÓN ─────────────────────────────
 
-    // Respaldo si la Sheet no está configurada o falla la descarga.
-    // En uso normal la cola sale de Google Sheets (CONFIG.sheet).
+    // Respaldo vacío a propósito: no subir cédulas al repo. La cola vive en la Sheet.
     // ciudadTramite: string o arreglo en orden de preferencia.
-    const CLIENTES_INICIALES = [
-        {
-            cedula:43978264,
-            ciudadTramite: [
-               'Medellín - Solicitud de devolución y/o compensación Vehículos eléctricos o Híbridos persona natural',
-               'Medellín Solicitud de devolución y/o compensación persona natural',
-           ],
-            scheduled: false,
-        },
-        {
-            cedula: 80004587,
-            ciudadTramite:
-                'Bogotá - Solicitud de devolución y/o compensación Vehículos eléctricos o Híbridos persona natural',
-            scheduled: false,
-        }
-    ];
+    const CLIENTES_INICIALES = [];
 
     const CONFIG = {
         // Página donde arranca el flujo. El script vuelve aquí en cada ciclo.
         // Player.aspx redirige a Default.aspx?Error=3; el recurso real es este.
         urlInicio: 'https://agendamiento.dian.gov.co',
 
-        // Lista remota de clientes. Pegar aquí la URL /exec del Apps Script
-        // (ver dian-clientes-apps-script.gs). Si url está vacía, se usa CLIENTES_INICIALES.
+        // Lista remota de clientes. La URL /exec NO va aquí (repo público): se guarda
+        // en localStorage con el botón "Sheet URL" del panel, o en la clave
+        // dianMonitorSheetUrl. Ver dian-clientes-apps-script.gs.
         sheet: {
             activo: true,
-            url: 'https://script.google.com/macros/s/AKfycbyQ564Ao7sisiLukgtG5iPZYfuTYiHGNFMfX_Akz6OhveK1CQPQzEJTvLbo37Un8xz-wA/exec',
+            url: '',
             timeoutMs: 15000,
         },
 
@@ -200,7 +185,11 @@
 
     const CLAVE = 'dianMonitorCitas';
     const CLAVE_CLIENTES = 'dianMonitorClientes';
+    const CLAVE_SHEET_URL = 'dianMonitorSheetUrl';
     const INTERVALO_MS = CONFIG.intervaloMinutos * 60 * 1000;
+
+    // URL del Apps Script: CONFIG.sheet.url (vacío en git) o localStorage local.
+    const urlSheet = () => (CONFIG.sheet.url || localStorage.getItem(CLAVE_SHEET_URL) || '').trim();
 
     // Cliente cuyo trámite se eligió en este ciclo. Su cédula se usa en el PasoTres
     // y se marca agendado cuando aparece el modal de éxito.
@@ -294,8 +283,13 @@
     }
 
     function pedirClientesSheet() {
-        const { url, timeoutMs } = CONFIG.sheet;
+        const url = urlSheet();
+        const { timeoutMs } = CONFIG.sheet;
         return new Promise((resolve, reject) => {
+            if (!url) {
+                reject(new Error('no hay URL de Sheet configurada'));
+                return;
+            }
             if (typeof GM_xmlhttpRequest !== 'function') {
                 reject(new Error('falta el permiso GM_xmlhttpRequest en Tampermonkey'));
                 return;
@@ -327,7 +321,8 @@
 
     // Al inicio de cada ciclo: Sheet si hay URL; si no, o si falla, el respaldo local.
     async function sincronizarClientes() {
-        const { activo, url } = CONFIG.sheet;
+        const { activo } = CONFIG.sheet;
+        const url = urlSheet();
         if (!activo || !url) {
             log('Sheet desactivada o sin URL; se usa CLIENTES_INICIALES');
             return fusionarClientes(CLIENTES_INICIALES);
@@ -972,6 +967,19 @@
         botonExportar.style.cssText = boton.style.cssText;
         botonExportar.onclick = () => exportarCitas();
 
+        const botonSheet = document.createElement('button');
+        botonSheet.textContent = 'Sheet URL';
+        botonSheet.style.cssText = boton.style.cssText;
+        botonSheet.onclick = () => {
+            const actual = urlSheet();
+            const nueva = window.prompt('URL /exec del Apps Script (se guarda solo en este navegador):', actual);
+            if (nueva === null) return;
+            const limpia = nueva.trim();
+            if (limpia) localStorage.setItem(CLAVE_SHEET_URL, limpia);
+            else localStorage.removeItem(CLAVE_SHEET_URL);
+            pintar(limpia ? 'URL de Sheet guardada en este navegador.' : 'URL de Sheet borrada.');
+        };
+
         refrescarBoton = () => {
             boton.textContent = leerEstado().activo ? 'Detener' : 'Iniciar';
         };
@@ -990,7 +998,7 @@
         };
 
         refrescarBoton();
-        botones.append(boton, botonExportar);
+        botones.append(boton, botonExportar, botonSheet);
         $panel.append(titulo, $estado, botones);
         document.body.appendChild($panel);
     }

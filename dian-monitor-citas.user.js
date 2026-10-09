@@ -1,19 +1,19 @@
 // ==UserScript==
-// @name         DIAN - Monitor de citas (sandbox)
+// @name         DIAN - Monitor de citas
 // @namespace    devoluciones
-// @version      1.3-sandbox
-// @description  [SANDBOX] Pruebas del monitor de citas DIAN
+// @version      1.3
+// @description  Recorre el flujo de agendamiento y avisa cuando hay cita disponible
 // @match        https://agendamiento.dian.gov.co/*
 // @run-at       document-idle
 // @grant        GM_xmlhttpRequest
 // @grant        unsafeWindow
 // @connect      script.google.com
 // @connect      script.googleusercontent.com
-// @downloadURL  https://raw.githubusercontent.com/fernandoavila44/super-scheduler/sandbox/dian-monitor-citas.user.js
-// @updateURL    https://raw.githubusercontent.com/fernandoavila44/super-scheduler/sandbox/dian-monitor-citas.user.js
+// @downloadURL  https://raw.githubusercontent.com/fernandoavila44/super-scheduler/master/dian-monitor-citas.user.js
+// @updateURL    https://raw.githubusercontent.com/fernandoavila44/super-scheduler/master/dian-monitor-citas.user.js
 // ==/UserScript==
 //
-// Esta rama (sandbox) es para pruebas. La versión oficial está en master.
+// master = versión oficial. Pruebas en la rama sandbox.
 //
 
 (function () {

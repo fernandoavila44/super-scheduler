@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Super Scheduler (sandbox)
 // @namespace    super-scheduler
-// @version      1.5-sandbox
+// @version      1.6-sandbox
 // @description  [SANDBOX] Appointment scheduling monitor
 // @match        https://agendamiento.dian.gov.co/*
 // @run-at       document-idle
@@ -351,27 +351,44 @@
         });
     }
 
-    // Al inicio de cada ciclo: Sheet si hay URL; si no, o si falla, el respaldo local.
+    // Al inicio de cada ciclo. Si la Sheet falla, se usa la última caché local
+    // (nunca CLIENTES_INICIALES vacío: eso hacía creer que "todos están agendados").
+    // confiable=true solo cuando la Sheet respondió bien: solo entonces FinCola.
     async function sincronizarClientes() {
+        const cache = leerClientesGuardados();
         const { activo } = CONFIG.sheet;
         const url = urlSheet();
+
         if (!activo || !url) {
-            log('Sheet desactivada o sin URL; se usa CLIENTES_INICIALES');
-            return fusionarClientes(CLIENTES_INICIALES);
+            if (cache.length) {
+                log(`Sheet sin URL; se usa caché local (${cache.length} clientes)`);
+                return { clientes: cache, confiable: false };
+            }
+            const lista = fusionarClientes(CLIENTES_INICIALES);
+            return { clientes: lista, confiable: false };
         }
 
         try {
             const remotos = await pedirClientesSheet();
             if (!remotos.length) {
-                log('la Sheet no devolvió clientes; se usa CLIENTES_INICIALES');
-                return fusionarClientes(CLIENTES_INICIALES);
+                if (cache.length) {
+                    log('Sheet vacía o sin filas; se conserva la caché local');
+                    return { clientes: cache, confiable: false };
+                }
+                return { clientes: [], confiable: true };
             }
             const pendientes = remotos.filter((c) => !c.scheduled).length;
             log(`Sheet: ${remotos.length} cliente(s), ${pendientes} pendiente(s)`);
-            return fusionarClientes(remotos, { sheetManda: true });
+            return {
+                clientes: fusionarClientes(remotos, { sheetManda: true }),
+                confiable: true,
+            };
         } catch (e) {
-            log('no se pudo leer la Sheet (' + e.message + '); se usa CLIENTES_INICIALES');
-            return fusionarClientes(CLIENTES_INICIALES);
+            if (cache.length) {
+                log(`Sheet falló (${e.message}); se usa caché local (${cache.length} clientes)`);
+                return { clientes: cache, confiable: false };
+            }
+            throw new Error(`no se pudo leer la Sheet y no hay caché local: ${e.message}`);
         }
     }
 
@@ -919,10 +936,15 @@
         let exito = false;
         let esperaMs = INTERVALO_MS;
         try {
-            const clientes = await sincronizarClientes();
+            const { clientes, confiable } = await sincronizarClientes();
             const pendientes = clientes.filter((c) => !c.scheduled);
             pintar(`Ciclo ${estado.ciclos}: ${pendientes.length} pendiente(s)...`);
-            if (!pendientes.length) throw new FinCola('Todos los clientes ya están agendados');
+            if (!pendientes.length) {
+                // Solo si la Sheet respondió: si falló la red y la caché quedó vacía
+                // o solo con agendados dudosos, no apagar el monitor como "fin de cola".
+                if (confiable) throw new FinCola('Todos los clientes ya están agendados');
+                throw new Error('sin pendientes en caché (la Sheet no confirmó el estado)');
+            }
 
             for (const paso of CONFIG.pasos) {
                 log(`→ ${paso.desc || paso.sel}`);

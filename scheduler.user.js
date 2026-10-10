@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Super Scheduler (sandbox)
 // @namespace    super-scheduler
-// @version      1.4-sandbox
+// @version      1.5-sandbox
 // @description  [SANDBOX] Appointment scheduling monitor
 // @match        https://agendamiento.dian.gov.co/*
 // @run-at       document-idle
@@ -232,43 +232,57 @@
         return s;
     }
 
+    function parseScheduled(v) {
+        if (v === true || v === 1) return true;
+        if (v === false || v === 0 || v == null || v === '') return false;
+        const s = String(v).trim().toLowerCase();
+        return s === 'true' || s === '1' || s === 'yes' || s === 'si' || s === 'sí';
+    }
+
     function normalizarClienteRemoto(c) {
         if (!c || c.cedula == null || c.cedula === '') return null;
         const ciudadTramite = parseCiudadTramite(c.ciudadTramite);
         if (!ciudadTramite || (Array.isArray(ciudadTramite) && !ciudadTramite.length)) return null;
-        return {
-            cedula: String(c.cedula).replace(/\D/g, '') || c.cedula,
+        const cedula = String(c.cedula).replace(/\D/g, '') || String(c.cedula);
+        const scheduled = parseScheduled(c.scheduled);
+        const fecha = (c.date || (c.cita && c.cita.fecha) || '').toString().trim();
+        const hora = (c.hour || (c.cita && c.cita.hora) || '').toString().trim();
+        const entrada = {
+            cedula: /^\d+$/.test(cedula) ? Number(cedula) : c.cedula,
             ciudadTramite,
+            scheduled,
         };
+        if (fecha || hora || (c.cita && c.cita.tramite)) {
+            entrada.cita = {
+                fecha,
+                hora,
+                tramite: (c.cita && c.cita.tramite) || '',
+                agendadoEn: (c.cita && c.cita.agendadoEn) || '',
+            };
+        }
+        return entrada;
     }
 
-    // La Sheet (o CLIENTES_INICIALES) define quién agendar y con qué trámite.
-    // localStorage conserva scheduled y cita de ciclos anteriores.
-    function fusionarClientes(base) {
+    // La Sheet es la fuente de verdad de scheduled/date/hour.
+    // localStorage solo cachea la última sincronización (y respaldo si falla la red).
+    function fusionarClientes(base, { sheetManda = false } = {}) {
         const guardados = leerClientesGuardados();
         const porCedula = new Map(guardados.map((c) => [String(c.cedula), c]));
-        const vistos = new Set();
 
         const lista = base
-            .map((c) => normalizarClienteRemoto(c) || c)
+            .map((c) => normalizarClienteRemoto(c))
             .filter((c) => c && c.cedula != null && c.ciudadTramite)
             .map((c) => {
-                const cedula = String(c.cedula);
-                vistos.add(cedula);
-                const previo = porCedula.get(cedula);
+                const previo = porCedula.get(String(c.cedula));
+                if (sheetManda) return c;
+                // Respaldo local / CLIENTES_INICIALES: conservar scheduled local.
                 const entrada = {
-                    cedula: /^\d+$/.test(cedula) ? Number(cedula) : c.cedula,
-                    ciudadTramite: c.ciudadTramite,
-                    scheduled: !!(previo && previo.scheduled),
+                    ...c,
+                    scheduled: !!(c.scheduled || (previo && previo.scheduled)),
                 };
-                if (previo && previo.cita) entrada.cita = previo.cita;
+                if (!entrada.cita && previo && previo.cita) entrada.cita = previo.cita;
                 return entrada;
             });
-
-        // Clientes ya agendados que salieron de la Sheet se conservan para exportar.
-        for (const g of guardados) {
-            if (g.scheduled && !vistos.has(String(g.cedula))) lista.push(g);
-        }
 
         guardarClientes(lista);
         return lista;
@@ -278,40 +292,62 @@
         return leerClientesGuardados();
     }
 
-    function pedirClientesSheet() {
-        const url = urlSheet();
+    function gmRequest({ method, url, data }) {
         const { timeoutMs } = CONFIG.sheet;
         return new Promise((resolve, reject) => {
-            if (!url) {
-                reject(new Error('no hay URL de Sheet configurada'));
-                return;
-            }
             if (typeof GM_xmlhttpRequest !== 'function') {
                 reject(new Error('falta el permiso GM_xmlhttpRequest en Tampermonkey'));
                 return;
             }
             GM_xmlhttpRequest({
-                method: 'GET',
+                method,
                 url,
+                data,
                 timeout: timeoutMs,
                 anonymous: true,
+                headers: data ? { 'Content-Type': 'application/json' } : undefined,
                 onload: (res) => {
                     if (res.status < 200 || res.status >= 300) {
                         reject(new Error('HTTP ' + res.status));
                         return;
                     }
                     try {
-                        const data = JSON.parse(res.responseText);
-                        const arr = Array.isArray(data) ? data : data && data.clientes;
-                        if (!Array.isArray(arr)) throw new Error('la respuesta no trae un arreglo de clientes');
-                        resolve(arr.map(normalizarClienteRemoto).filter(Boolean));
+                        resolve(JSON.parse(res.responseText));
                     } catch (e) {
                         reject(e);
                     }
                 },
-                onerror: () => reject(new Error('error de red al leer la Sheet')),
-                ontimeout: () => reject(new Error('timeout al leer la Sheet')),
+                onerror: () => reject(new Error('error de red al hablar con la Sheet')),
+                ontimeout: () => reject(new Error('timeout al hablar con la Sheet')),
             });
+        });
+    }
+
+    function pedirClientesSheet() {
+        const url = urlSheet();
+        if (!url) return Promise.reject(new Error('no hay URL de Sheet configurada'));
+        return gmRequest({ method: 'GET', url }).then((data) => {
+            const arr = Array.isArray(data) ? data : data && data.clientes;
+            if (!Array.isArray(arr)) throw new Error('la respuesta no trae un arreglo de clientes');
+            return arr.map(normalizarClienteRemoto).filter(Boolean);
+        });
+    }
+
+    // GET con action=schedule (más fiable que POST con los redirects de Apps Script).
+    function actualizarClienteSheet({ cedula, date, hour, scheduled = true }) {
+        const base = urlSheet();
+        if (!base) return Promise.reject(new Error('no hay URL de Sheet configurada'));
+        const sep = base.includes('?') ? '&' : '?';
+        const qs = new URLSearchParams({
+            action: 'schedule',
+            cedula: String(cedula),
+            scheduled: scheduled ? 'true' : 'false',
+            date: date || '',
+            hour: hour || '',
+        });
+        return gmRequest({ method: 'GET', url: base + sep + qs.toString() }).then((data) => {
+            if (!data || data.ok === false) throw new Error((data && data.error) || 'la Sheet rechazó la actualización');
+            return data;
         });
     }
 
@@ -330,8 +366,9 @@
                 log('la Sheet no devolvió clientes; se usa CLIENTES_INICIALES');
                 return fusionarClientes(CLIENTES_INICIALES);
             }
-            log(`Sheet: ${remotos.length} cliente(s) pendientes de sincronizar`);
-            return fusionarClientes(remotos);
+            const pendientes = remotos.filter((c) => !c.scheduled).length;
+            log(`Sheet: ${remotos.length} cliente(s), ${pendientes} pendiente(s)`);
+            return fusionarClientes(remotos, { sheetManda: true });
         } catch (e) {
             log('no se pudo leer la Sheet (' + e.message + '); se usa CLIENTES_INICIALES');
             return fusionarClientes(CLIENTES_INICIALES);
@@ -354,20 +391,33 @@
         };
     }
 
-    function marcarAgendado() {
+    async function marcarAgendado() {
         if (!clienteActual) return;
         const lista = cargarClientes();
         const cliente = lista.find((c) => String(c.cedula) === String(clienteActual.cedula));
         if (!cliente) return;
 
+        const cita = leerResumenCita();
         cliente.scheduled = true;
-        cliente.cita = leerResumenCita();
+        cliente.cita = cita;
         guardarClientes(lista);
         log(
-            `   ${cliente.cedula} agendado: ${cliente.cita.fecha || '?'} ${cliente.cita.hora || '?'} — ${
-                cliente.cita.tramite || cliente.ciudadTramite
+            `   ${cliente.cedula} agendado: ${cita.fecha || '?'} ${cita.hora || '?'} — ${
+                cita.tramite || cliente.ciudadTramite
             }`,
         );
+
+        try {
+            await actualizarClienteSheet({
+                cedula: cliente.cedula,
+                scheduled: true,
+                date: cita.fecha,
+                hour: cita.hora,
+            });
+            log('   Sheet actualizada (scheduled/date/hour)');
+        } catch (e) {
+            log('   no se pudo actualizar la Sheet: ' + e.message);
+        }
     }
 
     function exportarCitas() {
@@ -768,7 +818,7 @@
             // El title de los días del calendario dice la fecha completa, útil
             // para saber después qué quedó elegido.
             if (el.title) log(`   ${el.title}`);
-            if (paso.marcarCliente) marcarAgendado();
+            if (paso.marcarCliente) await marcarAgendado();
             clicar(resolverObjetivo(el));
         }
 

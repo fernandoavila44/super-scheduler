@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Super Scheduler
 // @namespace    super-scheduler
-// @version      1.9
+// @version      1.10
 // @description  Appointment scheduling monitor
 // @match        https://agendamiento.dian.gov.co/*
 // @run-at       document-idle
@@ -175,9 +175,6 @@
             selAceptar: 'div[tipo="Control"][pantalla="ModalError"][nombre="btnAceptar"]',
             // Cuánto se espera a que el modal aparezca antes de dar por bueno el paso.
             timeoutMs: 4000,
-            // Reintento más corto que el normal: los cupos del trámite aparecen y
-            // desaparecen rápido, así que no vale la pena esperar el ciclo completo.
-            minutosReintento: 1,
         },
     };
 
@@ -484,13 +481,7 @@
 
     // El flujo llegó al final y simplemente no había nada: es un resultado
     // esperado, no un fallo del script, y el ciclo lo reporta distinto.
-    // reintentoMs permite acortar la espera cuando conviene insistir antes.
-    class SinCupo extends Error {
-        constructor(mensaje, reintentoMs) {
-            super(mensaje);
-            this.reintentoMs = reintentoMs;
-        }
-    }
+    class SinCupo extends Error {}
 
     // La cola se acabó: no tiene sentido seguir recargando.
     class FinCola extends Error {}
@@ -664,7 +655,7 @@
         const sel = 'div[nombrecontrol="Servicios"] select.customSelect';
         const select = await esperarElemento(sel, null, CONFIG.timeoutElementoMs);
         if (!select) {
-            throw new SinCupo('No apareció el trámite', CONFIG.sinEspecialidades.minutosReintento * 60 * 1000);
+            throw new SinCupo('No apareció el trámite');
         }
         select.scrollIntoView({ block: 'center' });
 
@@ -686,7 +677,7 @@
             opciones = Array.from(select.options).filter((o) => o.value !== '');
         }
         if (!opciones.length) {
-            throw new SinCupo('el trámite no cargó opciones', CONFIG.sinEspecialidades.minutosReintento * 60 * 1000);
+            throw new SinCupo('el trámite no cargó opciones');
         }
 
         log(`   opciones de trámite: ${opciones.length}`);
@@ -717,10 +708,7 @@
             return true;
         }
 
-        throw new SinCupo(
-            'ningún cliente pendiente coincide con los trámites disponibles',
-            CONFIG.sinEspecialidades.minutosReintento * 60 * 1000,
-        );
+        throw new SinCupo('ningún cliente pendiente coincide con los trámites disponibles');
     }
 
     async function escribirDocumento() {
@@ -747,7 +735,7 @@
     // especialidades. Es un "no hay cupo" temprano: se cierra el aviso y se
     // reintenta pronto, sin recorrer el resto del flujo.
     async function revisarSinEspecialidades() {
-        const { selAceptar, timeoutMs, minutosReintento } = CONFIG.sinEspecialidades;
+        const { selAceptar, timeoutMs } = CONFIG.sinEspecialidades;
         const limite = Date.now() + timeoutMs;
 
         while (Date.now() < limite) {
@@ -765,7 +753,7 @@
                     clicar(resolverObjetivo(aceptar));
                     await dormir(CONFIG.pausaEntrePasosMs);
                 }
-                throw new SinCupo('no hay especialidades para el trámite', minutosReintento * 60 * 1000);
+                throw new SinCupo('no hay especialidades para el trámite');
             }
             await dormir(300);
         }
@@ -1001,7 +989,6 @@
                 return;
             }
             resultado = e instanceof SinCupo ? `sin cupo (${e.message})` : `falló: ${e.message}`;
-            if (e instanceof SinCupo && e.reintentoMs) esperaMs = e.reintentoMs;
         }
 
         // El paso del captcha detiene el monitor en cuanto confirma que hay cita,
@@ -1011,8 +998,8 @@
             return;
         }
 
-        const minutos = Math.round((esperaMs / 60000) * 10) / 10;
-        pintar(`Ciclo ${estado.ciclos}: ${resultado}. Reintento en ${minutos} min.`);
+        const segundos = Math.round(esperaMs / 1000);
+        pintar(`Ciclo ${estado.ciclos}: ${resultado}. Reintento en ${segundos} s.`);
         programarSiguiente(esperaMs);
     }
 

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Super Scheduler
 // @namespace    super-scheduler
-// @version      1.8
+// @version      1.9
 // @description  Appointment scheduling monitor
 // @match        https://agendamiento.dian.gov.co/*
 // @run-at       document-idle
@@ -42,7 +42,8 @@
             timeoutMs: 15000,
         },
 
-        intervaloMinutos: 1,
+        // Tiempo entre ciclos cuando no hay cupo (o tras un fallo recuperable).
+        intervaloSegundos: 30,
 
         // Tras agendar, si quedan clientes, espera esto y vuelve a empezar.
         segundosAntesDelSiguienteCliente: 8,
@@ -187,7 +188,7 @@
     const CLAVE_CLIENTES = 'ssMonitorClientes';
     const CLAVE_SHEET_URL = 'ssSheetUrl';
     const CLAVE_HOJA = 'ssSheetHoja';
-    const INTERVALO_MS = CONFIG.intervaloMinutos * 60 * 1000;
+    const INTERVALO_MS = CONFIG.intervaloSegundos * 1000;
 
     // URL del Apps Script: CONFIG.sheet.url (vacío en git) o localStorage local.
     const urlSheet = () => (CONFIG.sheet.url || localStorage.getItem(CLAVE_SHEET_URL) || '').trim();

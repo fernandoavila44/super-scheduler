@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Super Scheduler
 // @namespace    super-scheduler
-// @version      1.6
+// @version      1.8
 // @description  Appointment scheduling monitor
 // @match        https://agendamiento.dian.gov.co/*
 // @run-at       document-idle
@@ -30,11 +30,15 @@
         // Player.aspx redirige a Default.aspx?Error=3; el recurso real es este.
         urlInicio: 'https://agendamiento.dian.gov.co',
 
-        // URL /exec del API remoto: no va en el repo. Se guarda en localStorage
-        // con el botón "Sheet URL" del panel (clave ssSheetUrl). Ver clientes-api.gs.
+        // URL /exec y nombre de pestaña (ciudad) no van en el repo: se guardan en
+        // localStorage con el panel. Ver clientes-api.gs.
         sheet: {
             activo: true,
             url: '',
+            // Nombre exacto de la pestaña; vacío = se elige en el dropdown del panel.
+            hoja: '',
+            // Opciones del dropdown (deben coincidir con los nombres de las pestañas).
+            ciudades: ['Bogota', 'Medellin', 'Cali'],
             timeoutMs: 15000,
         },
 
@@ -182,10 +186,20 @@
     const CLAVE = 'ssMonitorState';
     const CLAVE_CLIENTES = 'ssMonitorClientes';
     const CLAVE_SHEET_URL = 'ssSheetUrl';
+    const CLAVE_HOJA = 'ssSheetHoja';
     const INTERVALO_MS = CONFIG.intervaloMinutos * 60 * 1000;
 
     // URL del Apps Script: CONFIG.sheet.url (vacío en git) o localStorage local.
     const urlSheet = () => (CONFIG.sheet.url || localStorage.getItem(CLAVE_SHEET_URL) || '').trim();
+
+    // Nombre de la pestaña / ciudad a la que apunta este PC.
+    const nombreHoja = () => (CONFIG.sheet.hoja || localStorage.getItem(CLAVE_HOJA) || '').trim();
+
+    // Caché por ciudad para no mezclar Bogotá con Medellín al cambiar de hoja.
+    const claveClientes = () => {
+        const hoja = nombreHoja();
+        return hoja ? `${CLAVE_CLIENTES}:${hoja}` : CLAVE_CLIENTES;
+    };
 
     // Cliente cuyo trámite se eligió en este ciclo. Su cédula se usa en el PasoTres
     // y se marca agendado cuando aparece el modal de éxito.
@@ -204,11 +218,11 @@
         return nuevo;
     };
 
-    const guardarClientes = (lista) => localStorage.setItem(CLAVE_CLIENTES, JSON.stringify(lista));
+    const guardarClientes = (lista) => localStorage.setItem(claveClientes(), JSON.stringify(lista));
 
     function leerClientesGuardados() {
         try {
-            const raw = JSON.parse(localStorage.getItem(CLAVE_CLIENTES));
+            const raw = JSON.parse(localStorage.getItem(claveClientes()));
             return Array.isArray(raw) ? raw : [];
         } catch {
             return [];
@@ -325,8 +339,12 @@
 
     function pedirClientesSheet() {
         const url = urlSheet();
+        const hoja = nombreHoja();
         if (!url) return Promise.reject(new Error('no hay URL de Sheet configurada'));
-        return gmRequest({ method: 'GET', url }).then((data) => {
+        if (!hoja) return Promise.reject(new Error('no hay ciudad/hoja configurada'));
+        const sep = url.includes('?') ? '&' : '?';
+        const qs = new URLSearchParams({ hoja });
+        return gmRequest({ method: 'GET', url: url + sep + qs.toString() }).then((data) => {
             const arr = Array.isArray(data) ? data : data && data.clientes;
             if (!Array.isArray(arr)) throw new Error('la respuesta no trae un arreglo de clientes');
             return arr.map(normalizarClienteRemoto).filter(Boolean);
@@ -336,10 +354,13 @@
     // GET con action=schedule (más fiable que POST con los redirects de Apps Script).
     function actualizarClienteSheet({ cedula, date, hour, scheduled = true }) {
         const base = urlSheet();
+        const hoja = nombreHoja();
         if (!base) return Promise.reject(new Error('no hay URL de Sheet configurada'));
+        if (!hoja) return Promise.reject(new Error('no hay ciudad/hoja configurada'));
         const sep = base.includes('?') ? '&' : '?';
         const qs = new URLSearchParams({
             action: 'schedule',
+            hoja,
             cedula: String(cedula),
             scheduled: scheduled ? 'true' : 'false',
             date: date || '',
@@ -358,6 +379,7 @@
         const cache = leerClientesGuardados();
         const { activo } = CONFIG.sheet;
         const url = urlSheet();
+        const hoja = nombreHoja();
 
         if (!activo || !url) {
             if (cache.length) {
@@ -368,17 +390,21 @@
             return { clientes: lista, confiable: false };
         }
 
+        if (!hoja) {
+            throw new Error('elige la ciudad en el dropdown del panel');
+        }
+
         try {
             const remotos = await pedirClientesSheet();
             if (!remotos.length) {
                 if (cache.length) {
-                    log('Sheet vacía o sin filas; se conserva la caché local');
+                    log(`Hoja "${hoja}" vacía; se conserva la caché local`);
                     return { clientes: cache, confiable: false };
                 }
                 return { clientes: [], confiable: true };
             }
             const pendientes = remotos.filter((c) => !c.scheduled).length;
-            log(`Sheet: ${remotos.length} cliente(s), ${pendientes} pendiente(s)`);
+            log(`Hoja "${hoja}": ${remotos.length} cliente(s), ${pendientes} pendiente(s)`);
             return {
                 clientes: fusionarClientes(remotos, { sheetManda: true }),
                 confiable: true,
@@ -1048,6 +1074,35 @@
             pintar(limpia ? 'URL de Sheet guardada en este navegador.' : 'URL de Sheet borrada.');
         };
 
+        const selectCiudad = document.createElement('select');
+        selectCiudad.style.cssText =
+            'cursor:pointer;padding:4px 8px;border:1px solid #666;border-radius:4px;background:#f3f3f3;max-width:140px';
+        const opcionVacia = document.createElement('option');
+        opcionVacia.value = '';
+        opcionVacia.textContent = 'Ciudad…';
+        selectCiudad.appendChild(opcionVacia);
+        for (const ciudad of CONFIG.sheet.ciudades || []) {
+            const op = document.createElement('option');
+            op.value = ciudad;
+            op.textContent = ciudad;
+            selectCiudad.appendChild(op);
+        }
+        selectCiudad.value = nombreHoja();
+        if (nombreHoja() && selectCiudad.value !== nombreHoja()) {
+            // Ciudad guardada que no está en la lista: se añade para no perderla.
+            const opExtra = document.createElement('option');
+            opExtra.value = nombreHoja();
+            opExtra.textContent = nombreHoja();
+            selectCiudad.appendChild(opExtra);
+            selectCiudad.value = nombreHoja();
+        }
+        selectCiudad.onchange = () => {
+            const limpia = selectCiudad.value.trim();
+            if (limpia) localStorage.setItem(CLAVE_HOJA, limpia);
+            else localStorage.removeItem(CLAVE_HOJA);
+            pintar(limpia ? `Ciudad/hoja: ${limpia}` : 'Ciudad/hoja borrada.');
+        };
+
         refrescarBoton = () => {
             boton.textContent = leerEstado().activo ? 'Detener' : 'Iniciar';
         };
@@ -1066,7 +1121,7 @@
         };
 
         refrescarBoton();
-        botones.append(boton, botonExportar, botonSheet);
+        botones.append(boton, botonExportar, botonSheet, selectCiudad);
         $panel.append(titulo, $estado, botones);
         document.body.appendChild($panel);
     }

@@ -1,9 +1,10 @@
 function doGet(e) {
   e = e || { parameter: {} };
-  if (e.parameter && e.parameter.action === 'schedule') {
-    return schedule_(e.parameter);
+  var p = e.parameter || {};
+  if (p.action === 'schedule') {
+    return schedule_(p);
   }
-  return listar_();
+  return listar_(p);
 }
 
 function doPost(e) {
@@ -16,8 +17,8 @@ function doPost(e) {
   return schedule_(body);
 }
 
-function listar_() {
-  var ctx = hojaConIndices_();
+function listar_(datos) {
+  var ctx = hojaConIndices_(datos && datos.hoja);
   if (ctx.error) return json_({ error: ctx.error, clientes: [] });
 
   var clientes = [];
@@ -41,14 +42,14 @@ function listar_() {
     });
   }
 
-  return json_({ clientes: clientes });
+  return json_({ clientes: clientes, hoja: ctx.nombreHoja });
 }
 
 function schedule_(datos) {
   var cedula = String((datos && datos.cedula) || '').replace(/\D/g, '');
   if (!cedula) return json_({ ok: false, error: 'Falta cedula' });
 
-  var ctx = hojaConIndices_();
+  var ctx = hojaConIndices_(datos && datos.hoja);
   if (ctx.error) return json_({ ok: false, error: ctx.error });
   if (ctx.iScheduled < 0 || ctx.iDate < 0 || ctx.iHour < 0) {
     return json_({
@@ -78,6 +79,7 @@ function schedule_(datos) {
 
   return json_({
     ok: true,
+    hoja: ctx.nombreHoja,
     cedula: cedula,
     scheduled: scheduled,
     date: textoCelda_(datos.date),
@@ -85,12 +87,33 @@ function schedule_(datos) {
   });
 }
 
-function hojaConIndices_() {
-  var hoja = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Clientes');
-  if (!hoja) return { error: 'No existe la hoja "Clientes"' };
+function obtenerHoja_(nombre) {
+  nombre = String(nombre || '').trim();
+  if (!nombre) return { error: 'Falta el parámetro hoja (nombre de la pestaña / ciudad)' };
 
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var hoja = ss.getSheetByName(nombre);
+  if (hoja) return { hoja: hoja, nombreHoja: hoja.getName() };
+
+  var objetivo = nombre.toLowerCase();
+  var sheets = ss.getSheets();
+  for (var i = 0; i < sheets.length; i++) {
+    if (sheets[i].getName().toLowerCase() === objetivo) {
+      return { hoja: sheets[i], nombreHoja: sheets[i].getName() };
+    }
+  }
+  return { error: 'No existe la hoja "' + nombre + '"' };
+}
+
+function hojaConIndices_(nombreHoja) {
+  var encontrada = obtenerHoja_(nombreHoja);
+  if (encontrada.error) return encontrada;
+
+  var hoja = encontrada.hoja;
   var valores = hoja.getDataRange().getValues();
-  if (!valores.length) return { error: 'La hoja "Clientes" está vacía', hoja: hoja, valores: [] };
+  if (!valores.length) {
+    return { error: 'La hoja "' + encontrada.nombreHoja + '" está vacía', hoja: hoja, valores: [] };
+  }
 
   var headers = valores[0].map(function (h) {
     return String(h).trim().toLowerCase();
@@ -103,6 +126,7 @@ function hojaConIndices_() {
 
   return {
     hoja: hoja,
+    nombreHoja: encontrada.nombreHoja,
     valores: valores,
     iCedula: iCedula,
     iTramite: iTramite,

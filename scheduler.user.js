@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Super Scheduler (sandbox)
 // @namespace    super-scheduler
-// @version      1.10-sandbox
+// @version      1.11-sandbox
 // @description  [SANDBOX] Appointment scheduling monitor
 // @match        https://agendamiento.dian.gov.co/*
 // @run-at       document-idle
@@ -105,23 +105,26 @@
                 sel: 'div[nombrecontrol="DatosCorretos"] input[type="radio"][value="1"]',
                 marcar: true,
                 desc: 'Datos correctos: Sí',
+                espera: 400,
             },
             {
                 sel: 'div[nombrecontrol="TerminosCondiciones"] input[type="checkbox"]',
                 marcar: true,
                 desc: 'Aceptar tratamiento de datos',
+                espera: 400,
             },
             {
                 sel: 'div[tipo="Control"][pantalla="PasoTres"][nombre="btnSiguiente"]',
                 desc: 'Siguiente (paso tres)',
-                espera: 3000,
+                // Corto a propósito: cada ms aquí retrasa empezar a buscar Agendar.
+                espera: 500,
             },
             // Paso irreversible: aquí la cita queda reservada. Comparte clase con
             // btnActualizarCita, así que se distingue por el atributo nombre.
             {
                 sel: 'div[tipo="Control"][pantalla="PasoCuatro"][nombre="btnAgendarCita"]',
                 desc: 'Agendar cita',
-                espera: 3000,
+                espera: 400,
             },
             // Confirmación. Hay un btnAceptar por modal, de ahí el filtro por pantalla.
             {

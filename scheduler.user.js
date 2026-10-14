@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Super Scheduler (sandbox)
 // @namespace    super-scheduler
-// @version      1.12-sandbox
+// @version      1.13-sandbox
 // @description  [SANDBOX] Appointment scheduling monitor
 // @match        https://agendamiento.dian.gov.co/*
 // @run-at       document-idle
@@ -188,6 +188,8 @@
     const CLAVE_CLIENTES = 'ssMonitorClientes';
     const CLAVE_SHEET_URL = 'ssSheetUrl';
     const CLAVE_HOJA = 'ssSheetHoja';
+    // Últimas líneas de diagnóstico (consola + localStorage). No es un archivo.
+    const CLAVE_LOG = 'ssMonitorLog';
     const INTERVALO_MS = CONFIG.intervaloSegundos * 1000;
 
     // URL del Apps Script: CONFIG.sheet.url (vacío en git) o localStorage local.
@@ -563,23 +565,43 @@
             opcion = await esperarOpcion(select, coincide, 2000);
         }
         if (!opcion) return null;
-
-        // Algunos controls muestran el texto de la hora con value aún vacío.
-        if (String(opcion.value || '').trim() !== '') {
-            select.value = opcion.value;
-        } else {
-            select.selectedIndex = opcion.index;
-        }
-        disparar(select, ['input', 'change']);
-        select.blur();
+        aplicarOpcionSelect(select, opcion);
         return opcion;
     }
 
-    // Hora usable: value real, o texto tipo hora aunque el value aún no haya llegado.
+    function aplicarOpcionSelect(select, opcion) {
+        // selectedIndex es más fiable que value con cadenas tipo
+        // "10/15/2026 2:00:00 PM" (formato real del select de Horas DIAN).
+        select.selectedIndex = opcion.index;
+        opcion.selected = true;
+        if (String(opcion.value || '').trim() !== '') {
+            select.value = opcion.value;
+        }
+        disparar(select, ['input', 'change']);
+        select.blur();
+    }
+
+    // Formato real DIAN: texto "2:00 PM" / value "10/15/2026 2:00:00 PM".
     function esOpcionHora(o) {
         if (!o || o.disabled) return false;
-        if (String(o.value || '').trim() !== '') return true;
-        return /\d{1,2}\s*:\s*\d{2}/.test((o.textContent || '').trim());
+        const texto = (o.textContent || '').replace(/\s+/g, ' ').trim();
+        const value = String(o.value || '').trim();
+        if (!value && !texto) return false;
+        if (/\d{1,2}\s*:\s*\d{2}(\s*[AaPp]\.?\s*[Mm]\.?)?/.test(texto)) return true;
+        if (/\d{1,2}\/\d{1,2}\/\d{2,4}\s+\d{1,2}:\d{2}/.test(value)) return true;
+        if (!value) return false;
+        if (/^(0|-1|null|undefined)$/i.test(value)) return false;
+        if (/seleccion|elija|elige|hora/i.test(texto) && !/\d/.test(texto)) return false;
+        return true;
+    }
+
+    function resumenOpcionesHoras(select) {
+        if (!select) return 'sin select';
+        const opts = Array.from(select.options);
+        if (!opts.length) return 'sin options';
+        return opts
+            .map((o) => `"${(o.textContent || '').replace(/\s+/g, ' ').trim()}" value="${o.value}" disabled=${o.disabled}`)
+            .join(' | ');
     }
 
     // Las horas que ofrece la página dependen del día elegido, así que un día
@@ -603,6 +625,31 @@
             if (!(await esperarElemento(selAbierto, null, 5000))) throw new Error('El calendario no se desplegó');
         }
 
+        // Re-consulta el <select> en cada sondeo (el player puede recrearlo).
+        // No spamear clics: las options ya vienen en el DOM; abrir el combo cada
+        // 250 ms puede impedir que el value quede seleccionado.
+        async function esperarYElegirHora(timeout) {
+            const limite = Date.now() + timeout;
+            while (Date.now() < limite) {
+                const select = buscar(selHoras);
+                if (select) {
+                    const opcion = Array.from(select.options).find(esOpcionHora);
+                    if (opcion) {
+                        select.focus();
+                        aplicarOpcionSelect(select, opcion);
+                        // Confirmar que el native select quedó en esa opción.
+                        const ok =
+                            select.selectedIndex === opcion.index ||
+                            (opcion.value && select.value === opcion.value);
+                        if (ok) return { select, opcion };
+                        log(`   hora no quedó seleccionada (index=${select.selectedIndex}, value="${select.value}")`);
+                    }
+                }
+                await dormir(250);
+            }
+            return { select: buscar(selHoras), opcion: null };
+        }
+
         await abrirCalendario();
 
         // Se guardan los data-value y no los nodos porque el calendario se vuelve
@@ -615,6 +662,7 @@
         if (!dias.length) throw new SinCupo('el calendario no tiene días habilitados');
         log(`   días habilitados: ${dias.length}`);
 
+        let ultimoDetalle = '';
         for (const valor of dias) {
             await abrirCalendario();
 
@@ -628,25 +676,21 @@
             clicar(dia);
             await dormir(CONFIG.pausaEntrePasosMs);
 
-            const horas = await esperarElemento(selHoras, null, 5000);
-            if (!horas) {
-                log('   no apareció el select de horas');
-                continue;
-            }
-
-            // Esperar a que haya una opción usable (value o texto HH:MM), no solo
-            // a que exista el <select>: a veces la fila ya se ve y value sigue "".
-            const opcion = await elegirOpcion(horas, esOpcionHora, timeoutHorasMs);
+            const { select, opcion } = await esperarYElegirHora(timeoutHorasMs);
             if (opcion) {
                 log(`   hora elegida: ${opcion.textContent.trim()} (value="${opcion.value}")`);
                 return true;
             }
 
-            const vistas = Array.from(horas.options).map((o) => `"${o.textContent.trim()}" value="${o.value}"`);
-            log(`   ese día no tiene horas libres (${vistas.join(' | ') || 'sin options'})`);
+            ultimoDetalle = resumenOpcionesHoras(select);
+            log(`   ese día no tiene horas libres (${ultimoDetalle})`);
         }
 
-        throw new SinCupo('ningún día habilitado tiene horas libres');
+        throw new SinCupo(
+            ultimoDetalle
+                ? `ningún día habilitado tiene horas libres [${ultimoDetalle}]`
+                : 'ningún día habilitado tiene horas libres',
+        );
     }
 
     // El reCAPTCHA vive en un iframe de google.com: el script no puede marcarlo
@@ -1040,6 +1084,15 @@
 
     function log(msg) {
         console.log('[scheduler]', msg);
+        try {
+            const linea = `${new Date().toISOString()} ${msg}`;
+            const prev = JSON.parse(localStorage.getItem(CLAVE_LOG) || '[]');
+            const arr = Array.isArray(prev) ? prev : [];
+            arr.push(linea);
+            localStorage.setItem(CLAVE_LOG, JSON.stringify(arr.slice(-80)));
+        } catch {
+            /* ignore quota / JSON issues */
+        }
     }
 
     function pintar(texto, exito = false) {

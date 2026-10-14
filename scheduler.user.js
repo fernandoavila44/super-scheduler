@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Super Scheduler (sandbox)
 // @namespace    super-scheduler
-// @version      1.11-sandbox
+// @version      1.12-sandbox
 // @description  [SANDBOX] Appointment scheduling monitor
 // @match        https://agendamiento.dian.gov.co/*
 // @run-at       document-idle
@@ -148,8 +148,8 @@
                 'div[nombrecontrol="Calendario"] td.k-calendar-td:not(.k-disabled):not(.k-other-month) a.k-link',
             selHoras: 'div[nombrecontrol="Horas"] select.customSelect',
             // Cuánto esperar las horas de un día antes de descartarlo y probar el
-            // siguiente. Corto a propósito: se repite por cada día candidato.
-            timeoutHorasMs: 8000,
+            // siguiente. Margen alto: a veces el texto aparece antes que el value.
+            timeoutHorasMs: 12000,
         },
 
         captcha: {
@@ -564,10 +564,22 @@
         }
         if (!opcion) return null;
 
-        select.value = opcion.value;
+        // Algunos controls muestran el texto de la hora con value aún vacío.
+        if (String(opcion.value || '').trim() !== '') {
+            select.value = opcion.value;
+        } else {
+            select.selectedIndex = opcion.index;
+        }
         disparar(select, ['input', 'change']);
         select.blur();
         return opcion;
+    }
+
+    // Hora usable: value real, o texto tipo hora aunque el value aún no haya llegado.
+    function esOpcionHora(o) {
+        if (!o || o.disabled) return false;
+        if (String(o.value || '').trim() !== '') return true;
+        return /\d{1,2}\s*:\s*\d{2}/.test((o.textContent || '').trim());
     }
 
     // Las horas que ofrece la página dependen del día elegido, así que un día
@@ -617,13 +629,21 @@
             await dormir(CONFIG.pausaEntrePasosMs);
 
             const horas = await esperarElemento(selHoras, null, 5000);
-            const opcion = horas && (await elegirOpcion(horas, (o) => o.value !== '', timeoutHorasMs));
+            if (!horas) {
+                log('   no apareció el select de horas');
+                continue;
+            }
+
+            // Esperar a que haya una opción usable (value o texto HH:MM), no solo
+            // a que exista el <select>: a veces la fila ya se ve y value sigue "".
+            const opcion = await elegirOpcion(horas, esOpcionHora, timeoutHorasMs);
             if (opcion) {
-                log(`   hora elegida: ${opcion.textContent.trim()}`);
+                log(`   hora elegida: ${opcion.textContent.trim()} (value="${opcion.value}")`);
                 return true;
             }
 
-            log('   ese día no tiene horas libres');
+            const vistas = Array.from(horas.options).map((o) => `"${o.textContent.trim()}" value="${o.value}"`);
+            log(`   ese día no tiene horas libres (${vistas.join(' | ') || 'sin options'})`);
         }
 
         throw new SinCupo('ningún día habilitado tiene horas libres');

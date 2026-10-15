@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Super Scheduler
 // @namespace    super-scheduler
-// @version      1.17
+// @version      1.18
 // @description  Appointment scheduling monitor
 // @match        https://agendamiento.dian.gov.co/*
 // @run-at       document-idle
@@ -148,8 +148,9 @@
             {
                 sel: 'div[tipo="Control"][pantalla="PasoDos"][nombre="btnSiguiente"]',
                 desc: 'Siguiente (paso dos)',
-                esperaHasta: '#g-recaptcha-response, #divPasoTresNumeroDocumento input',
-                espera: 200,
+                // No esperar #g-recaptcha-response aquí: va display:none y bloqueaba
+                // el paso del captcha (alarma / título CUPOS / AHK) hasta 45 s o más.
+                espera: 300,
             },
             // Aquí el monitor se detiene, avisa y espera a que resuelvas el captcha.
             { accion: 'captcha', desc: 'Captcha (manual)' },
@@ -919,6 +920,21 @@
         );
     }
 
+    // Widget / pantalla del captcha (el textarea del token casi siempre está oculto).
+    function captchaUiPresente() {
+        if (document.querySelector('iframe[src*="recaptcha"]')) return true;
+        if (document.querySelector('iframe[title*="reCAPTCHA"], iframe[title*="recaptcha"]')) return true;
+        if (document.querySelector('.g-recaptcha, [data-sitekey]')) return true;
+        if (document.querySelector('#g-recaptcha-response')) return true;
+        const paso = document.querySelector(
+            'div[nombrepantalla="PasoTres"] [tipo="Pantalla"][nombre="PasoTres"]',
+        );
+        if (!paso) return false;
+        const st = estiloDe(paso);
+        if (st) return st.display !== 'none' && st.visibility !== 'hidden';
+        return visibleEnPantalla(paso);
+    }
+
     // El reCAPTCHA vive en un iframe de google.com: el script no puede marcarlo
     // (es otro origen) y Google rechaza los clics sintéticos incluso si pudiera.
     // Lo resuelve la persona. Llegar hasta aquí ya significa que hay fecha y hora
@@ -926,7 +942,15 @@
     async function esperarCaptcha() {
         const { selToken, timeoutMs } = CONFIG.captcha;
 
+        // Primero que pinte el PasoTres / widget; luego alarma al instante.
+        const limiteUi = Date.now() + CONFIG.timeoutElementoMs;
+        while (Date.now() < limiteUi && !captchaUiPresente()) {
+            await dormir(150);
+        }
+        if (!captchaUiPresente()) throw new Error('No apareció el captcha');
+
         detener('¡CUPOS! Marca el captcha y el script sigue solo.');
+        log('captcha en pantalla → alarma y título CUPOS');
 
         const limite = Date.now() + timeoutMs;
         while (Date.now() < limite) {
@@ -1191,19 +1215,40 @@
         const temporizadores = [];
         let ctx = null;
 
+        // Título al instante: AHK busca "CUPOS" en la ventana (no esperar el interval).
+        const original = document.title.includes('CUPOS') ? 'Agendamiento' : document.title;
+        document.title = '*** CUPOS ***';
+        let on = true;
+        temporizadores.push(
+            setInterval(() => {
+                document.title = (on = !on) ? '*** CUPOS ***' : original;
+            }, 800),
+        );
+
         try {
-            ctx = new (window.AudioContext || window.webkitAudioContext)();
-            // Tras una recarga no hay gesto del usuario, así que Chrome puede
-            // dejar el contexto suspendido y el pitido no suena.
-            ctx.resume().catch(() => {});
+            const AC = vistaPagina().AudioContext || vistaPagina().webkitAudioContext;
+            ctx = new AC();
+            // Tras soft-retries largos Chrome deja el contexto suspendido.
+            const intentarResume = () => ctx && ctx.resume && ctx.resume().catch(() => {});
+            intentarResume();
             if (ctx.state === 'suspended') {
                 log(
                     'audio bloqueado por la política de autoplay del navegador; ' +
-                        'quedan la notificación y el título',
+                        'quedan la notificación y el título CUPOS',
                 );
+                // Reintentar resume unas veces (a veces se libera solo).
+                let intentos = 0;
+                const idResume = setInterval(() => {
+                    intentos += 1;
+                    intentarResume();
+                    if (!ctx || ctx.state === 'running' || intentos > 10) clearInterval(idResume);
+                }, 1000);
+                temporizadores.push(idResume);
             }
 
             const rafaga = () => {
+                if (!ctx || ctx.state === 'closed') return;
+                intentarResume();
                 let t = ctx.currentTime;
                 for (let i = 0; i < bipsPorRafaga; i++) {
                     const osc = ctx.createOscillator();
@@ -1232,14 +1277,6 @@
         if (window.Notification && Notification.permission === 'granted') {
             new Notification('Cupo disponible', { body: cuerpo });
         }
-
-        const original = document.title;
-        let on = false;
-        temporizadores.push(
-            setInterval(() => {
-                document.title = (on = !on) ? '*** CUPOS ***' : original;
-            }, 800),
-        );
 
         pararAlarma = () => {
             temporizadores.forEach(clearInterval);

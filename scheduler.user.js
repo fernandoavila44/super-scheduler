@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Super Scheduler (sandbox)
 // @namespace    super-scheduler
-// @version      1.16-sandbox
+// @version      1.17-sandbox
 // @description  [SANDBOX] Appointment scheduling monitor
 // @match        https://agendamiento.dian.gov.co/*
 // @run-at       document-idle
@@ -562,14 +562,39 @@
 
     // El flujo llegó al final y simplemente no había nada: es un resultado
     // esperado, no un fallo del script, y el ciclo lo reporta distinto.
-    class SinCupo extends Error {}
+    class SinCupo extends Error {
+        constructor(mensaje) {
+            super(mensaje);
+            this.name = 'SinCupo';
+        }
+    }
 
     // La cola se acabó: no tiene sentido seguir recargando.
-    class FinCola extends Error {}
+    class FinCola extends Error {
+        constructor(mensaje) {
+            super(mensaje);
+            this.name = 'FinCola';
+        }
+    }
+
+    const esSinCupo = (e) => !!(e && (e instanceof SinCupo || e.name === 'SinCupo'));
+    const esFinCola = (e) => !!(e && (e instanceof FinCola || e.name === 'FinCola'));
 
     const dormir = (ms) => new Promise((r) => setTimeout(r, ms));
 
     const visible = (el) => !!(el && el.offsetParent !== null);
+
+    // offsetParent falla con algunos contenedores del player; rect + computedStyle.
+    function visibleEnPantalla(el) {
+        if (!el) return false;
+        if (visible(el)) return true;
+        const st = estiloDe(el);
+        if (st && (st.display === 'none' || st.visibility === 'hidden' || Number(st.opacity) === 0)) {
+            return false;
+        }
+        const r = el.getBoundingClientRect();
+        return r.width > 0 && r.height > 0;
+    }
 
     const vistaPagina = () => (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window);
 
@@ -624,18 +649,25 @@
     }
 
     // Botón Aceptar del ModalError visible = el aviso de sin cupo ya está en pantalla.
-    // También el texto del aviso en innerText (excluye display:none).
+    // No usar solo body.innerText: tras cerrar el modal el texto puede quedar en el DOM.
     function hayModalSinCupo() {
         const sel = CONFIG.sinEspecialidades && CONFIG.sinEspecialidades.selAceptar;
-        if (sel && buscar(sel)) return true;
-        if (pantallaOverlayVisible('ModalError')) return true;
+        if (sel) {
+            const btn = Array.from(document.querySelectorAll(sel)).find(visibleEnPantalla);
+            if (btn) return true;
+        }
+        if (!pantallaOverlayVisible('ModalError')) return false;
         const aviso = normalizar(CONFIG.textoSinCupo);
-        return !!aviso && normalizar(document.body.innerText || '').includes(aviso);
+        if (!aviso) return true;
+        const modal = document.querySelector('div[nombrepantalla="ModalError"]');
+        return !!(modal && normalizar(modal.innerText || '').includes(aviso));
     }
 
     async function cerrarAvisoSinCupo(motivo) {
         const sel = CONFIG.sinEspecialidades && CONFIG.sinEspecialidades.selAceptar;
-        const aceptar = (sel && buscar(sel)) || (sel && document.querySelector(sel));
+        const aceptar =
+            (sel && Array.from(document.querySelectorAll(sel)).find(visibleEnPantalla)) ||
+            (sel && document.querySelector(sel));
         if (aceptar) {
             log('   cerrando el aviso');
             clicar(resolverObjetivo(aceptar));
@@ -644,11 +676,12 @@
         throw new SinCupo(motivo || 'no hay especialidades para el trámite');
     }
 
-    async function esperarSinCarga(timeout) {
+    async function esperarSinCarga(timeout, opts = {}) {
+        const lanzarSinCupo = opts.lanzarSinCupo !== false;
         const porDefecto = (CONFIG.cargando && CONFIG.cargando.timeoutMs) || 15000;
         const limite = Date.now() + (timeout ?? porDefecto);
         while (Date.now() < limite) {
-            if (hayModalSinCupo()) await cerrarAvisoSinCupo();
+            if (lanzarSinCupo && hayModalSinCupo()) await cerrarAvisoSinCupo();
             if (!estaCargando()) {
                 await dormir(50);
                 if (!estaCargando()) return true;
@@ -669,7 +702,7 @@
         while (Date.now() < limite) {
             if (hayModalSinCupo()) await cerrarAvisoSinCupo();
             for (const sel of lista) {
-                const el = buscar(sel);
+                const el = buscar(sel) || Array.from(document.querySelectorAll(sel)).find(visibleEnPantalla);
                 if (el) return el;
             }
             await dormir(150);
@@ -1223,42 +1256,65 @@
         return idx >= 0 ? idx : 0;
     }
 
-    function categoriaVisible() {
+    function encontrarCategoria() {
         const sel = (CONFIG.reintento && CONFIG.reintento.selCategoria) || '';
-        return !!(sel && buscar(sel));
+        if (!sel) return null;
+        return buscar(sel) || Array.from(document.querySelectorAll(sel)).find(visibleEnPantalla) || null;
     }
 
-    // Cierra un ModalError residual sin lanzar (el throw ya ocurrió en el ciclo).
+    function categoriaVisible() {
+        return !!encontrarCategoria();
+    }
+
+    function inicioVisible() {
+        return !!buscar('div[nombrecontrol="btnSolicitarCita"]');
+    }
+
+    // Cierra un ModalError residual sin lanzar SinCupo (evita abortar el soft-retry).
     async function descartarModalErrorSiHay() {
         const sel = CONFIG.sinEspecialidades && CONFIG.sinEspecialidades.selAceptar;
         if (!sel) return;
-        const aceptar = buscar(sel) || document.querySelector(sel);
-        if (!aceptar) return;
-        if (!hayModalSinCupo() && !visible(aceptar)) return;
+        const aceptar =
+            Array.from(document.querySelectorAll(sel)).find(visibleEnPantalla) || document.querySelector(sel);
+        if (!aceptar || !hayModalSinCupo()) return;
         log('   cerrando modal residual');
         clicar(resolverObjetivo(aceptar));
         await dormir(CONFIG.pausaEntrePasosMs);
-        await esperarSinCarga(5000);
+        await esperarSinCarga(5000, { lanzarSinCupo: false });
     }
 
-    // Vuelve a la pantalla de categoría sin recargar. Si no puede, false → recarga.
+    // Prepara el DOM para reintentar sin recargar.
+    // Devuelve 'categoria' | 'inicio' | null (null = no queda más que recargar).
     async function prepararReintentoSuave() {
         await descartarModalErrorSiHay();
-        if (categoriaVisible()) return true;
+        if (categoriaVisible()) return 'categoria';
 
         const selAnt = (CONFIG.reintento && CONFIG.reintento.selAnterior) || '';
         const max = (CONFIG.reintento && CONFIG.reintento.intentosAnterior) || 6;
         for (let i = 0; i < max; i++) {
-            const ant = selAnt ? buscar(selAnt) : null;
+            const ant = selAnt
+                ? buscar(selAnt) || Array.from(document.querySelectorAll(selAnt)).find(visibleEnPantalla)
+                : null;
             if (!ant) break;
             log(`   Anterior (${i + 1}/${max}) para volver a categoría`);
             clicar(resolverObjetivo(ant));
-            await esperarSinCarga(8000);
+            await esperarSinCarga(8000, { lanzarSinCupo: false });
             await dormir(CONFIG.esperaTrasClicMs ?? 200);
             await descartarModalErrorSiHay();
-            if (categoriaVisible()) return true;
+            if (categoriaVisible()) return 'categoria';
         }
-        return categoriaVisible();
+
+        if (categoriaVisible()) return 'categoria';
+        // Tras Aceptar el player a veces vuelve al inicio del flujo: seguir sin recargar.
+        if (inicioVisible()) return 'inicio';
+        return null;
+    }
+
+    function recargarInicio(motivo) {
+        softSeguidos = 0;
+        log(motivo || 'recarga a inicio');
+        guardarEstado({ ejecutando: false, reintentoSoft: false, proximo: Date.now() });
+        location.href = CONFIG.urlInicio;
     }
 
     async function ejecutarCiclo(opts = {}) {
@@ -1277,16 +1333,17 @@
         try {
             let pasos = CONFIG.pasos;
             if (soft) {
-                const listo = await prepararReintentoSuave();
-                if (!listo) {
-                    log('reintento suave: no se pudo volver a Categoría → recarga');
-                    softSeguidos = 0;
-                    guardarEstado({ ejecutando: false, proximo: Date.now() });
-                    location.href = CONFIG.urlInicio;
+                const desde = await prepararReintentoSuave();
+                if (!desde) {
+                    recargarInicio('reintento suave: DOM no recuperable → recarga');
                     return;
                 }
-                pasos = CONFIG.pasos.slice(indicePasoCategoria());
-                log(`reintento suave desde: ${pasos[0].desc || pasos[0].sel}`);
+                if (desde === 'categoria') {
+                    pasos = CONFIG.pasos.slice(indicePasoCategoria());
+                } else {
+                    pasos = CONFIG.pasos;
+                }
+                log(`reintento suave desde: ${desde} → ${pasos[0].desc || pasos[0].sel}`);
             }
 
             const { clientes, confiable } = await sincronizarClientes();
@@ -1322,16 +1379,17 @@
             }
             resultado = 'cita agendada. No quedan clientes pendientes';
         } catch (e) {
-            if (e instanceof FinCola) {
+            if (esFinCola(e)) {
                 softSeguidos = 0;
                 guardarEstado({ activo: false, ejecutando: false, ultimo: e.message });
                 pintar(e.message, true);
                 refrescarBoton();
                 return;
             }
-            fueSinCupo = e instanceof SinCupo;
+            fueSinCupo = esSinCupo(e);
             resultado = fueSinCupo ? `sin cupo (${e.message})` : `falló: ${e.message}`;
             if (!fueSinCupo) softSeguidos = 0;
+            log(`fin ciclo: ${resultado}${fueSinCupo ? ' [SinCupo→soft]' : ' [error→recarga]'}`);
         }
 
         // El paso del captcha detiene el monitor en cuanto confirma que hay cita,
@@ -1342,9 +1400,6 @@
         }
 
         const maxSoft = (CONFIG.reintento && CONFIG.reintento.softMaxSeguidos) || 8;
-        // Sin cupo: reintentar sobre el DOM; otros errores → recarga.
-        // Si Categoría no está a la vista, prepararReintentoSuave usará Anterior
-        // o caerá a recarga al vencer la espera.
         let usarSoft = false;
         if (fueSinCupo) {
             softSeguidos += 1;
@@ -1374,10 +1429,10 @@
             timerReintento = null;
             if (!leerEstado().activo) return;
             if (soft) {
+                log('disparo reintento suave (sin location.href)');
                 ejecutarCiclo({ soft: true });
             } else {
-                softSeguidos = 0;
-                location.href = CONFIG.urlInicio;
+                recargarInicio('disparo reintento con recarga');
             }
         }, esperaMs);
     }
@@ -1521,13 +1576,12 @@
         timerReintento = setTimeout(() => {
             timerReintento = null;
             if (!leerEstado().activo) return;
-            // Soft solo si seguimos en la misma página con Categoría a mano;
-            // si el usuario recargó el navegador, ir a inicio limpio.
-            if (leerEstado().reintentoSoft && categoriaVisible()) {
+            // Soft: intentar reutilizar el DOM. Solo recargar si preparar falla.
+            if (leerEstado().reintentoSoft) {
+                log('arranque: reintento suave pendiente');
                 ejecutarCiclo({ soft: true });
             } else {
-                softSeguidos = 0;
-                location.href = CONFIG.urlInicio;
+                recargarInicio('arranque: reintento con recarga');
             }
         }, resta);
     }

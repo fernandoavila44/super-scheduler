@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Super Scheduler (sandbox)
 // @namespace    super-scheduler
-// @version      1.14-sandbox
+// @version      1.15-sandbox
 // @description  [SANDBOX] Appointment scheduling monitor
 // @match        https://agendamiento.dian.gov.co/*
 // @run-at       document-idle
@@ -100,7 +100,9 @@
             {
                 sel: 'div.boton.btnCategoria[llave="63071985-f5bd-43fe-beed-38f64c97371b"]',
                 desc: 'Categoría del trámite',
-                esperaHasta: 'div[nombrecontrol="Servicios"] select.customSelect',
+                // Servicios OK, o ModalError si no hay cupo (no esperar 45 s al select).
+                esperaHasta:
+                    'div[nombrecontrol="Servicios"] select.customSelect, div[tipo="Control"][pantalla="ModalError"][nombre="btnAceptar"]',
                 espera: 200,
             },
             { accion: 'sinEspecialidades', desc: '¿Hay especialidades?' },
@@ -605,10 +607,32 @@
         return false;
     }
 
+    // Botón Aceptar del ModalError visible = el aviso de sin cupo ya está en pantalla.
+    // También el texto del aviso en innerText (excluye display:none).
+    function hayModalSinCupo() {
+        const sel = CONFIG.sinEspecialidades && CONFIG.sinEspecialidades.selAceptar;
+        if (sel && buscar(sel)) return true;
+        if (pantallaOverlayVisible('ModalError')) return true;
+        const aviso = normalizar(CONFIG.textoSinCupo);
+        return !!aviso && normalizar(document.body.innerText || '').includes(aviso);
+    }
+
+    async function cerrarAvisoSinCupo(motivo) {
+        const sel = CONFIG.sinEspecialidades && CONFIG.sinEspecialidades.selAceptar;
+        const aceptar = (sel && buscar(sel)) || (sel && document.querySelector(sel));
+        if (aceptar) {
+            log('   cerrando el aviso');
+            clicar(resolverObjetivo(aceptar));
+            await dormir(CONFIG.pausaEntrePasosMs);
+        }
+        throw new SinCupo(motivo || 'no hay especialidades para el trámite');
+    }
+
     async function esperarSinCarga(timeout) {
         const porDefecto = (CONFIG.cargando && CONFIG.cargando.timeoutMs) || 15000;
         const limite = Date.now() + (timeout ?? porDefecto);
         while (Date.now() < limite) {
+            if (hayModalSinCupo()) await cerrarAvisoSinCupo();
             if (!estaCargando()) {
                 await dormir(50);
                 if (!estaCargando()) return true;
@@ -627,6 +651,7 @@
                   .filter(Boolean);
         const limite = Date.now() + timeout;
         while (Date.now() < limite) {
+            if (hayModalSinCupo()) await cerrarAvisoSinCupo();
             for (const sel of lista) {
                 const el = buscar(sel);
                 if (el) return el;
@@ -637,10 +662,12 @@
     }
 
     async function estabilizarTrasPaso(paso) {
+        if (hayModalSinCupo()) await cerrarAvisoSinCupo();
         await esperarSinCarga((CONFIG.cargando && CONFIG.cargando.timeoutMs) || 15000);
         if (paso.esperaHasta) {
             await esperarCualquiera(paso.esperaHasta, CONFIG.timeoutElementoMs);
         }
+        if (hayModalSinCupo()) await cerrarAvisoSinCupo();
         const ms =
             paso.espera !== undefined
                 ? paso.espera
@@ -962,7 +989,7 @@
     // especialidades. Es un "no hay cupo" temprano: se cierra el aviso y se
     // reintenta pronto, sin recorrer el resto del flujo.
     async function revisarSinEspecialidades() {
-        const { selAceptar, timeoutMs, selServicios } = CONFIG.sinEspecialidades;
+        const { timeoutMs, selServicios } = CONFIG.sinEspecialidades;
         const selSvc = selServicios || 'div[nombrecontrol="Servicios"] select.customSelect';
         const limite = Date.now() + timeoutMs;
 
@@ -971,17 +998,7 @@
             const select = document.querySelector(selSvc);
             if (select && Array.from(select.options).some((o) => o.value !== '')) return true;
 
-            // ModalError por pantalla (más fiable que escanear todo el body).
-            if (pantallaOverlayVisible('ModalError') || avisoSinCupo()) {
-                const aceptar = document.querySelector(selAceptar);
-                if (aceptar) {
-                    log('   cerrando el aviso');
-                    clicar(resolverObjetivo(aceptar));
-                    await esperarSinCarga(5000);
-                    await dormir(CONFIG.pausaEntrePasosMs);
-                }
-                throw new SinCupo('no hay especialidades para el trámite');
-            }
+            if (hayModalSinCupo()) await cerrarAvisoSinCupo();
             await dormir(150);
         }
         return true;

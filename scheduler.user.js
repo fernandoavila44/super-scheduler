@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Super Scheduler (sandbox)
 // @namespace    super-scheduler
-// @version      1.15-sandbox
+// @version      1.16-sandbox
 // @description  [SANDBOX] Appointment scheduling monitor
 // @match        https://agendamiento.dian.gov.co/*
 // @run-at       document-idle
@@ -26,9 +26,21 @@
     const CLIENTES_INICIALES = [];
 
     const CONFIG = {
-        // Página donde arranca el flujo. El script vuelve aquí en cada ciclo.
+        // Página donde arranca el flujo. Recarga completa solo en fallos duros
+        // o tras agotar reintentos suaves (sin cupo reutiliza el DOM).
         // Player.aspx redirige a Default.aspx?Error=3; el recurso real es este.
         urlInicio: 'https://agendamiento.dian.gov.co',
+
+        // Sin cupo: cerrar modal y repetir desde Categoría sin recargar.
+        // Tras softMaxSeguidos fallos seguidos, o si no se puede volver a
+        // Categoría, se recarga la página (estado del player limpio).
+        reintento: {
+            softMaxSeguidos: 8,
+            selCategoria:
+                'div.boton.btnCategoria[llave="63071985-f5bd-43fe-beed-38f64c97371b"]',
+            selAnterior: 'div[tipo="Control"][nombre="btnAnterior"]',
+            intentosAnterior: 6,
+        },
 
         // URL /exec y nombre de pestaña (ciudad) no van en el repo: se guardan en
         // localStorage con el panel. Ver clientes-api.gs.
@@ -242,7 +254,7 @@
     };
 
     // ─────────────────────────── ESTADO PERSISTENTE ───────────────────────────
-    // Vive en localStorage porque el flujo recarga la página en cada ciclo.
+    // Vive en localStorage: hace falta si hay recarga; el reintento suave no recarga.
 
     const CLAVE = 'ssMonitorState';
     const CLAVE_CLIENTES = 'ssMonitorClientes';
@@ -251,6 +263,10 @@
     // Últimas líneas de diagnóstico (consola + localStorage). No es un archivo.
     const CLAVE_LOG = 'ssMonitorLog';
     const INTERVALO_MS = CONFIG.intervaloSegundos * 1000;
+
+    // Contador en memoria: el soft-retry no recarga, así que no hace falta persistirlo.
+    let softSeguidos = 0;
+    let timerReintento = null;
 
     // URL del Apps Script: CONFIG.sheet.url (vacío en git) o localStorage local.
     const urlSheet = () => (CONFIG.sheet.url || localStorage.getItem(CLAVE_SHEET_URL) || '').trim();
@@ -1202,14 +1218,77 @@
 
     // ───────────────────────────────── CICLO ──────────────────────────────────
 
-    async function ejecutarCiclo() {
-        const estado = guardarEstado({ ejecutando: true, ciclos: (leerEstado().ciclos || 0) + 1 });
-        pintar(`Ciclo ${estado.ciclos} en curso...`);
+    function indicePasoCategoria() {
+        const idx = CONFIG.pasos.findIndex((p) => p.sel && p.sel.includes('btnCategoria'));
+        return idx >= 0 ? idx : 0;
+    }
+
+    function categoriaVisible() {
+        const sel = (CONFIG.reintento && CONFIG.reintento.selCategoria) || '';
+        return !!(sel && buscar(sel));
+    }
+
+    // Cierra un ModalError residual sin lanzar (el throw ya ocurrió en el ciclo).
+    async function descartarModalErrorSiHay() {
+        const sel = CONFIG.sinEspecialidades && CONFIG.sinEspecialidades.selAceptar;
+        if (!sel) return;
+        const aceptar = buscar(sel) || document.querySelector(sel);
+        if (!aceptar) return;
+        if (!hayModalSinCupo() && !visible(aceptar)) return;
+        log('   cerrando modal residual');
+        clicar(resolverObjetivo(aceptar));
+        await dormir(CONFIG.pausaEntrePasosMs);
+        await esperarSinCarga(5000);
+    }
+
+    // Vuelve a la pantalla de categoría sin recargar. Si no puede, false → recarga.
+    async function prepararReintentoSuave() {
+        await descartarModalErrorSiHay();
+        if (categoriaVisible()) return true;
+
+        const selAnt = (CONFIG.reintento && CONFIG.reintento.selAnterior) || '';
+        const max = (CONFIG.reintento && CONFIG.reintento.intentosAnterior) || 6;
+        for (let i = 0; i < max; i++) {
+            const ant = selAnt ? buscar(selAnt) : null;
+            if (!ant) break;
+            log(`   Anterior (${i + 1}/${max}) para volver a categoría`);
+            clicar(resolverObjetivo(ant));
+            await esperarSinCarga(8000);
+            await dormir(CONFIG.esperaTrasClicMs ?? 200);
+            await descartarModalErrorSiHay();
+            if (categoriaVisible()) return true;
+        }
+        return categoriaVisible();
+    }
+
+    async function ejecutarCiclo(opts = {}) {
+        const soft = !!opts.soft;
+        const estado = guardarEstado({
+            ejecutando: true,
+            ciclos: (leerEstado().ciclos || 0) + 1,
+            reintentoSoft: false,
+        });
+        pintar(`Ciclo ${estado.ciclos}${soft ? ' (suave)' : ''} en curso...`);
 
         let resultado;
         let exito = false;
         let esperaMs = INTERVALO_MS;
+        let fueSinCupo = false;
         try {
+            let pasos = CONFIG.pasos;
+            if (soft) {
+                const listo = await prepararReintentoSuave();
+                if (!listo) {
+                    log('reintento suave: no se pudo volver a Categoría → recarga');
+                    softSeguidos = 0;
+                    guardarEstado({ ejecutando: false, proximo: Date.now() });
+                    location.href = CONFIG.urlInicio;
+                    return;
+                }
+                pasos = CONFIG.pasos.slice(indicePasoCategoria());
+                log(`reintento suave desde: ${pasos[0].desc || pasos[0].sel}`);
+            }
+
             const { clientes, confiable } = await sincronizarClientes();
             const pendientes = clientes.filter((c) => !c.scheduled);
             pintar(`Ciclo ${estado.ciclos}: ${pendientes.length} pendiente(s)...`);
@@ -1220,34 +1299,39 @@
                 throw new Error('sin pendientes en caché (la Sheet no confirmó el estado)');
             }
 
-            for (const paso of CONFIG.pasos) {
+            for (const paso of pasos) {
                 log(`→ ${paso.desc || paso.sel}`);
                 await ejecutarPaso(paso);
             }
             resultado = 'cita agendada, revisa el navegador y el correo';
             exito = true;
+            softSeguidos = 0;
 
             // detener() apagó el monitor al llegar al captcha para no recargar el
             // formulario. Con la cita ya hecha, si queda gente en la cola se enciende
-            // otra vez y el siguiente ciclo arranca desde el inicio.
+            // otra vez y el siguiente ciclo arranca desde el inicio (recarga: el
+            // formulario ya se consumió).
             const quedan = cargarClientes().some((c) => !c.scheduled);
             if (quedan) {
                 const segundos = CONFIG.segundosAntesDelSiguienteCliente;
                 guardarEstado({ activo: true, ejecutando: false, ultimo: resultado });
                 refrescarBoton();
                 pintar(`Ciclo ${estado.ciclos}: ${resultado}. Siguiente cliente en ${segundos} s.`, true);
-                programarSiguiente(segundos * 1000);
+                programarSiguiente(segundos * 1000, { soft: false });
                 return;
             }
             resultado = 'cita agendada. No quedan clientes pendientes';
         } catch (e) {
             if (e instanceof FinCola) {
+                softSeguidos = 0;
                 guardarEstado({ activo: false, ejecutando: false, ultimo: e.message });
                 pintar(e.message, true);
                 refrescarBoton();
                 return;
             }
-            resultado = e instanceof SinCupo ? `sin cupo (${e.message})` : `falló: ${e.message}`;
+            fueSinCupo = e instanceof SinCupo;
+            resultado = fueSinCupo ? `sin cupo (${e.message})` : `falló: ${e.message}`;
+            if (!fueSinCupo) softSeguidos = 0;
         }
 
         // El paso del captcha detiene el monitor en cuanto confirma que hay cita,
@@ -1257,15 +1341,44 @@
             return;
         }
 
+        const maxSoft = (CONFIG.reintento && CONFIG.reintento.softMaxSeguidos) || 8;
+        // Sin cupo: reintentar sobre el DOM; otros errores → recarga.
+        // Si Categoría no está a la vista, prepararReintentoSuave usará Anterior
+        // o caerá a recarga al vencer la espera.
+        let usarSoft = false;
+        if (fueSinCupo) {
+            softSeguidos += 1;
+            if (softSeguidos > maxSoft) {
+                softSeguidos = 0;
+                usarSoft = false;
+                log(`agotados ${maxSoft} reintentos suaves → recarga`);
+            } else {
+                usarSoft = true;
+            }
+        }
+
         const segundos = Math.round(esperaMs / 1000);
-        pintar(`Ciclo ${estado.ciclos}: ${resultado}. Reintento en ${segundos} s.`);
-        programarSiguiente(esperaMs);
+        const modo = usarSoft ? 'suave (sin recargar)' : 'con recarga';
+        pintar(`Ciclo ${estado.ciclos}: ${resultado}. Reintento ${modo} en ${segundos} s.`);
+        programarSiguiente(esperaMs, { soft: usarSoft });
     }
 
-    function programarSiguiente(esperaMs = INTERVALO_MS) {
-        guardarEstado({ ejecutando: false, proximo: Date.now() + esperaMs });
-        setTimeout(() => {
-            if (leerEstado().activo) location.href = CONFIG.urlInicio;
+    function programarSiguiente(esperaMs = INTERVALO_MS, { soft = false } = {}) {
+        guardarEstado({
+            ejecutando: false,
+            proximo: Date.now() + esperaMs,
+            reintentoSoft: !!soft,
+        });
+        if (timerReintento) clearTimeout(timerReintento);
+        timerReintento = setTimeout(() => {
+            timerReintento = null;
+            if (!leerEstado().activo) return;
+            if (soft) {
+                ejecutarCiclo({ soft: true });
+            } else {
+                softSeguidos = 0;
+                location.href = CONFIG.urlInicio;
+            }
         }, esperaMs);
     }
 
@@ -1365,11 +1478,17 @@
 
         boton.onclick = async () => {
             if (leerEstado().activo) {
-                guardarEstado({ activo: false });
+                if (timerReintento) {
+                    clearTimeout(timerReintento);
+                    timerReintento = null;
+                }
+                softSeguidos = 0;
+                guardarEstado({ activo: false, reintentoSoft: false, proximo: 0 });
                 pintar('Detenido.');
             } else {
                 if (window.Notification && Notification.permission === 'default') await Notification.requestPermission();
-                guardarEstado({ activo: true, ciclos: 0, proximo: 0 });
+                softSeguidos = 0;
+                guardarEstado({ activo: true, ciclos: 0, proximo: 0, reintentoSoft: false });
                 pintar('Iniciando...');
                 ejecutarCiclo();
             }
@@ -1390,12 +1509,26 @@
     if (!estado.activo) {
         pintar('Inactivo. Pulsa Iniciar.');
     } else if (!estado.proximo || Date.now() >= estado.proximo) {
+        // Tras una recarga de página el DOM del flujo no está: ciclo completo.
         ejecutarCiclo();
     } else {
-        const resta = estado.proximo - Date.now();
-        pintar(`En espera: próximo intento en ${Math.ceil(resta / 1000)} s.`);
-        setTimeout(() => {
-            if (leerEstado().activo) location.href = CONFIG.urlInicio;
+        const resta = Math.max(0, estado.proximo - Date.now());
+        const softPendiente = !!estado.reintentoSoft;
+        pintar(
+            `En espera: próximo intento ${softPendiente ? 'suave ' : ''}en ${Math.ceil(resta / 1000)} s.`,
+        );
+        if (timerReintento) clearTimeout(timerReintento);
+        timerReintento = setTimeout(() => {
+            timerReintento = null;
+            if (!leerEstado().activo) return;
+            // Soft solo si seguimos en la misma página con Categoría a mano;
+            // si el usuario recargó el navegador, ir a inicio limpio.
+            if (leerEstado().reintentoSoft && categoriaVisible()) {
+                ejecutarCiclo({ soft: true });
+            } else {
+                softSeguidos = 0;
+                location.href = CONFIG.urlInicio;
+            }
         }, resta);
     }
 })();

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Super Scheduler
 // @namespace    super-scheduler
-// @version      1.13
+// @version      1.14
 // @description  Appointment scheduling monitor
 // @match        https://agendamiento.dian.gov.co/*
 // @run-at       document-idle
@@ -51,8 +51,19 @@
         // Margen alto: el sitio a veces tarda en pintar controles.
         timeoutElementoMs: 45000,
 
-        // Pausa por defecto después de cada paso, si el paso no define "espera".
-        pausaEntrePasosMs: 1200,
+        // Margen mínimo tras un paso si no define "espera" (la sincronía real
+        // la hace esperaHasta / esperarSinCarga, no este número).
+        pausaEntrePasosMs: 300,
+
+        // Tras un clic, si el siguiente control ya está listo, igual se deja
+        // respirar al player (transiciones ~0.75s a veces).
+        esperaTrasClicMs: 200,
+
+        // Splash / capa de carga del WebPlayer: no avanzar mientras estén visibles.
+        cargando: {
+            sels: ['#mpcWPdivCargando', '.splash', '#divSplash'],
+            timeoutMs: 15000,
+        },
 
         // Pasos en el orden exacto en que se ejecutan.
         // Formas admitidas:
@@ -64,67 +75,112 @@
         //   { sel: '#numDoc', texto: '1234567890', desc: 'Documento' }           -> <input>
         //   { accion: 'fechaYHora' }                                             -> calendario + horas con reintento
         //   { accion: 'tramite' }                                                -> trámite según la cola de clientes
-        // Cada paso acepta además: espera (ms) y opcional: true (si falta, no aborta).
+        // Cada paso acepta: espera (ms), esperaHasta (sel o "a, b"), omitirSiMarcado,
+        // opcional: true (si falta, no aborta).
         pasos: [
-            { sel: 'div[nombrecontrol="btnSolicitarCita"]', desc: 'Solicitar cita', espera: 2000 },
-            { sel: 'div.boton.btnTipoPersona[llave="1"]', desc: 'Tipo de persona', espera: 2000 },
-            { sel: 'div.boton.btnTipoAtencion[llave="2"]', desc: 'Tipo de atención', espera: 2000 },
+            {
+                sel: 'div[nombrecontrol="btnSolicitarCita"]',
+                desc: 'Solicitar cita',
+                esperaHasta: 'div.boton.btnTipoPersona[llave="1"]',
+                espera: 200,
+            },
+            {
+                sel: 'div.boton.btnTipoPersona[llave="1"]',
+                desc: 'Tipo de persona',
+                esperaHasta: 'div.boton.btnTipoAtencion[llave="2"]',
+                espera: 200,
+            },
+            {
+                sel: 'div.boton.btnTipoAtencion[llave="2"]',
+                desc: 'Tipo de atención',
+                esperaHasta:
+                    'div.boton.btnCategoria[llave="63071985-f5bd-43fe-beed-38f64c97371b"]',
+                espera: 200,
+            },
             {
                 sel: 'div.boton.btnCategoria[llave="63071985-f5bd-43fe-beed-38f64c97371b"]',
                 desc: 'Categoría del trámite',
-                espera: 2000,
+                esperaHasta: 'div[nombrecontrol="Servicios"] select.customSelect',
+                espera: 200,
             },
             { accion: 'sinEspecialidades', desc: '¿Hay especialidades?' },
             // Abre el trámite y elige al primer cliente pendiente cuya ciudad
             // aparezca entre las opciones. Si no aparece, prueba con el siguiente.
-            { accion: 'tramite', desc: 'Trámite del cliente', espera: 500 },
+            {
+                accion: 'tramite',
+                desc: 'Trámite del cliente',
+                esperaHasta:
+                    'div[tipo="Control"][pantalla="PasoUno"][nombre="btnSiguiente"]',
+                espera: 200,
+            },
             // Hay un btnSiguiente por paso, más una variante btnSiguienteBlock que es
-            // la deshabilitada. Se apunta al del PasoUno y solo al habilitado, así que
-            // la espera del paso sirve también de garantía de que ya se puede avanzar.
+            // la deshabilitada. Se apunta al del PasoUno y solo al habilitado.
             {
                 sel: 'div[tipo="Control"][pantalla="PasoUno"][nombre="btnSiguiente"]',
                 desc: 'Siguiente (paso uno)',
-                espera: 2000,
+                esperaHasta:
+                    'div[tipo="Control"][pantalla="PasoDos"][nombre="btnFecha"]',
+                espera: 200,
             },
             // La fecha y la hora van juntas porque las horas dependen del día: si un
             // día no tiene horas libres hay que volver al calendario y probar otro.
-            { accion: 'fechaYHora', desc: 'Fecha y hora', espera: 2000 },
+            {
+                accion: 'fechaYHora',
+                desc: 'Fecha y hora',
+                esperaHasta:
+                    'div[tipo="Control"][pantalla="PasoDos"][nombre="btnSiguiente"]',
+                espera: 200,
+            },
             {
                 sel: 'div[tipo="Control"][pantalla="PasoDos"][nombre="btnSiguiente"]',
                 desc: 'Siguiente (paso dos)',
-                espera: 2000,
+                esperaHasta: '#g-recaptcha-response, #divPasoTresNumeroDocumento input',
+                espera: 200,
             },
             // Aquí el monitor se detiene, avisa y espera a que resuelvas el captcha.
             { accion: 'captcha', desc: 'Captcha (manual)' },
             // El campo del documento solo se muestra con el captcha resuelto, y la
-            // consulta se dispara al salir del campo.
-            { accion: 'documento', desc: 'Número de documento', espera: 4000 },
-            // Estos dos viven en contenedores que están ocultos hasta que la consulta
-            // del documento responde, así que la espera del paso hace de sincronía.
+            // consulta se dispara al salir del campo. La sincronía es esperaHasta.
+            {
+                accion: 'documento',
+                desc: 'Número de documento',
+                esperaHasta:
+                    'div[nombrecontrol="DatosCorretos"] input[type="radio"][value="1"], div[nombrecontrol="TerminosCondiciones"] input[type="checkbox"]',
+                espera: 200,
+            },
             {
                 sel: 'div[nombrecontrol="DatosCorretos"] input[type="radio"][value="1"]',
                 marcar: true,
+                omitirSiMarcado: true,
                 desc: 'Datos correctos: Sí',
-                espera: 400,
+                esperaHasta:
+                    'div[nombrecontrol="TerminosCondiciones"] input[type="checkbox"]',
+                espera: 150,
             },
             {
                 sel: 'div[nombrecontrol="TerminosCondiciones"] input[type="checkbox"]',
                 marcar: true,
+                omitirSiMarcado: true,
                 desc: 'Aceptar tratamiento de datos',
-                espera: 400,
+                esperaHasta:
+                    'div[tipo="Control"][pantalla="PasoTres"][nombre="btnSiguiente"]',
+                espera: 150,
             },
             {
                 sel: 'div[tipo="Control"][pantalla="PasoTres"][nombre="btnSiguiente"]',
                 desc: 'Siguiente (paso tres)',
-                // Corto a propósito: cada ms aquí retrasa empezar a buscar Agendar.
-                espera: 500,
+                esperaHasta:
+                    'div[tipo="Control"][pantalla="PasoCuatro"][nombre="btnAgendarCita"]',
+                espera: 200,
             },
             // Paso irreversible: aquí la cita queda reservada. Comparte clase con
             // btnActualizarCita, así que se distingue por el atributo nombre.
             {
                 sel: 'div[tipo="Control"][pantalla="PasoCuatro"][nombre="btnAgendarCita"]',
                 desc: 'Agendar cita',
-                espera: 400,
+                esperaHasta:
+                    'div[tipo="Control"][pantalla="ModalInfoCita"][nombre="btnAceptar"]',
+                espera: 200,
             },
             // Confirmación. Hay un btnAceptar por modal, de ahí el filtro por pantalla.
             {
@@ -176,8 +232,10 @@
             // El aviso sale en la pantalla ModalError, que es genérica; el botón se
             // localiza por su pantalla para no confundirlo con el de otro modal.
             selAceptar: 'div[tipo="Control"][pantalla="ModalError"][nombre="btnAceptar"]',
-            // Cuánto se espera a que el modal aparezca antes de dar por bueno el paso.
-            timeoutMs: 4000,
+            selServicios: 'div[nombrecontrol="Servicios"] select.customSelect',
+            // Si Servicios ya tiene opciones se sale al momento; si no, se espera
+            // el ModalError (o el timeout) sin gastar 4 s fijos en cada ciclo bueno.
+            timeoutMs: 3000,
         },
     };
 
@@ -495,6 +553,8 @@
 
     const visible = (el) => !!(el && el.offsetParent !== null);
 
+    const vistaPagina = () => (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window);
+
     // Sin tildes, sin mayúsculas y con los espacios colapsados, para que
     // "Bogotá - Univ. La Gran Colombia" case con "Bogota".
     const normalizar = (s) =>
@@ -504,6 +564,92 @@
     // Se las quita para compararlas con ciudadTramite.
     const limpiarTramite = (s) => normalizar(String(s)).replace(/["“”«»'`´.]/g, '').replace(/\s+/g, ' ').trim();
 
+    function estiloDe(el) {
+        try {
+            return vistaPagina().getComputedStyle(el);
+        } catch (_) {
+            return null;
+        }
+    }
+
+    // Modales del player usan position:absolute + display:none; offsetParent no
+    // basta. Se mira display/visibility del [tipo=Pantalla].
+    function pantallaOverlayVisible(nombre) {
+        const pantalla = document.querySelector(
+            `div[nombrepantalla="${nombre}"] [tipo="Pantalla"][nombre="${nombre}"]`,
+        );
+        if (!pantalla) return false;
+        const st = estiloDe(pantalla);
+        if (st) return st.display !== 'none' && st.visibility !== 'hidden';
+        const inline = pantalla.getAttribute('style') || '';
+        if (/display\s*:\s*none/i.test(inline)) return false;
+        return pantalla.style.display !== 'none';
+    }
+
+    function estaCargando() {
+        const sels = (CONFIG.cargando && CONFIG.cargando.sels) || ['#mpcWPdivCargando'];
+        for (const sel of sels) {
+            const el = document.querySelector(sel);
+            if (!el) continue;
+            if (el.classList && el.classList.contains('contenidoOculto')) continue;
+            const st = estiloDe(el);
+            if (st) {
+                if (st.display === 'none' || st.visibility === 'hidden' || st.opacity === '0') continue;
+                if (el.offsetWidth > 0 || el.offsetHeight > 0 || st.display === 'flex' || st.display === 'block') {
+                    return true;
+                }
+            } else if (visible(el)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    async function esperarSinCarga(timeout) {
+        const porDefecto = (CONFIG.cargando && CONFIG.cargando.timeoutMs) || 15000;
+        const limite = Date.now() + (timeout ?? porDefecto);
+        while (Date.now() < limite) {
+            if (!estaCargando()) {
+                await dormir(50);
+                if (!estaCargando()) return true;
+            }
+            await dormir(100);
+        }
+        return false;
+    }
+
+    async function esperarCualquiera(sels, timeout) {
+        const lista = Array.isArray(sels)
+            ? sels
+            : String(sels)
+                  .split(',')
+                  .map((s) => s.trim())
+                  .filter(Boolean);
+        const limite = Date.now() + timeout;
+        while (Date.now() < limite) {
+            for (const sel of lista) {
+                const el = buscar(sel);
+                if (el) return el;
+            }
+            await dormir(150);
+        }
+        return null;
+    }
+
+    async function estabilizarTrasPaso(paso) {
+        await esperarSinCarga((CONFIG.cargando && CONFIG.cargando.timeoutMs) || 15000);
+        if (paso.esperaHasta) {
+            await esperarCualquiera(paso.esperaHasta, CONFIG.timeoutElementoMs);
+        }
+        const ms =
+            paso.espera !== undefined
+                ? paso.espera
+                : CONFIG.esperaTrasClicMs !== undefined
+                  ? CONFIG.esperaTrasClicMs
+                  : CONFIG.pausaEntrePasosMs;
+        if (ms > 0) await dormir(ms);
+    }
+
     function buscar(sel, contiene) {
         const nodos = Array.from(document.querySelectorAll(sel)).filter(visible);
         if (!contiene) return nodos[0] || null;
@@ -512,11 +658,14 @@
     }
 
     async function esperarElemento(sel, contiene, timeout) {
+        if (!contiene && String(sel).includes(',')) {
+            return esperarCualquiera(sel, timeout);
+        }
         const limite = Date.now() + timeout;
         while (Date.now() < limite) {
             const el = buscar(sel, contiene);
             if (el) return el;
-            await dormir(250);
+            await dormir(150);
         }
         return null;
     }
@@ -674,7 +823,8 @@
 
             log(`   probando ${dia.title || valor}`);
             clicar(dia);
-            await dormir(CONFIG.pausaEntrePasosMs);
+            await esperarSinCarga(5000);
+            await dormir(CONFIG.esperaTrasClicMs ?? 200);
 
             const { select, opcion } = await esperarYElegirHora(timeoutHorasMs);
             if (opcion) {
@@ -796,33 +946,43 @@
         campo.blur();
         clicar(document.body);
         log(`   documento ${clienteActual.cedula}`);
+        // No dormir 4 s fijos: esperar a que salga Sí / términos tras la consulta.
+        await esperarSinCarga((CONFIG.cargando && CONFIG.cargando.timeoutMs) || 15000);
+        const postDoc = await esperarCualquiera(
+            [
+                'div[nombrecontrol="DatosCorretos"] input[type="radio"][value="1"]',
+                'div[nombrecontrol="TerminosCondiciones"] input[type="checkbox"]',
+            ],
+            CONFIG.timeoutElementoMs,
+        );
+        if (!postDoc) throw new Error('No aparecieron los controles tras el documento');
     }
 
     // Al elegir el trámite la página puede responder con el modal de que no hay
     // especialidades. Es un "no hay cupo" temprano: se cierra el aviso y se
     // reintenta pronto, sin recorrer el resto del flujo.
     async function revisarSinEspecialidades() {
-        const { selAceptar, timeoutMs } = CONFIG.sinEspecialidades;
+        const { selAceptar, timeoutMs, selServicios } = CONFIG.sinEspecialidades;
+        const selSvc = selServicios || 'div[nombrecontrol="Servicios"] select.customSelect';
         const limite = Date.now() + timeoutMs;
 
         while (Date.now() < limite) {
-            // Si el trámite ya tiene opciones, no hay modal que esperar: seguir
-            // aquí gastaba el timeout completo (4 s) en cada ciclo con cupo.
-            const select = document.querySelector('div[nombrecontrol="Servicios"] select.customSelect');
+            // Si el trámite ya tiene opciones, no hay modal que esperar.
+            const select = document.querySelector(selSvc);
             if (select && Array.from(select.options).some((o) => o.value !== '')) return true;
 
-            // innerText solo incluye lo que se está mostrando, así que detecta el
-            // aviso sin depender de cómo esté posicionado el modal.
-            if (avisoSinCupo()) {
+            // ModalError por pantalla (más fiable que escanear todo el body).
+            if (pantallaOverlayVisible('ModalError') || avisoSinCupo()) {
                 const aceptar = document.querySelector(selAceptar);
                 if (aceptar) {
                     log('   cerrando el aviso');
                     clicar(resolverObjetivo(aceptar));
+                    await esperarSinCarga(5000);
                     await dormir(CONFIG.pausaEntrePasosMs);
                 }
                 throw new SinCupo('no hay especialidades para el trámite');
             }
-            await dormir(300);
+            await dormir(150);
         }
         return true;
     }
@@ -835,25 +995,25 @@
 
         if (paso.accion === 'tramite') {
             await elegirTramite();
-            await dormir(paso.espera ?? CONFIG.pausaEntrePasosMs);
+            await estabilizarTrasPaso(paso);
             return true;
         }
 
         if (paso.accion === 'documento') {
             await escribirDocumento();
-            await dormir(paso.espera ?? CONFIG.pausaEntrePasosMs);
+            await estabilizarTrasPaso(paso);
             return true;
         }
 
         if (paso.accion === 'fechaYHora') {
             await elegirFechaYHora();
-            await dormir(paso.espera ?? CONFIG.pausaEntrePasosMs);
+            await estabilizarTrasPaso(paso);
             return true;
         }
 
         if (paso.accion === 'captcha') {
             await esperarCaptcha();
-            await dormir(paso.espera ?? CONFIG.pausaEntrePasosMs);
+            await estabilizarTrasPaso(paso);
             return true;
         }
 
@@ -864,6 +1024,13 @@
                 return true;
             }
             throw new Error(`No apareció: ${paso.desc || paso.sel}`);
+        }
+
+        // Radio/checkbox ya en Sí: no reclicar ni forzar esperas largas.
+        if (paso.marcar && paso.omitirSiMarcado && el.checked) {
+            log('   ya estaba marcado, se omite');
+            await estabilizarTrasPaso(paso);
+            return true;
         }
 
         el.scrollIntoView({ block: 'center' });
@@ -921,7 +1088,7 @@
             clicar(resolverObjetivo(el));
         }
 
-        await dormir(paso.espera ?? CONFIG.pausaEntrePasosMs);
+        await estabilizarTrasPaso(paso);
         return true;
     }
 
@@ -932,7 +1099,15 @@
     // de "el script se rompió" cuando el flujo se queda en el PasoUno.
     const avisoSinCupo = () => {
         const aviso = normalizar(CONFIG.textoSinCupo);
-        return !!aviso && normalizar(document.body.innerText).includes(aviso);
+        if (!aviso) return pantallaOverlayVisible('ModalError');
+        // Preferir el texto del ModalError visible; fallback al body por si el
+        // overlay aún no flipó display pero el mensaje ya está en el DOM.
+        if (pantallaOverlayVisible('ModalError')) {
+            const modal = document.querySelector('div[nombrepantalla="ModalError"]');
+            const texto = normalizar(modal ? modal.innerText : '');
+            if (texto.includes(aviso)) return true;
+        }
+        return normalizar(document.body.innerText).includes(aviso);
     };
 
     function detener(mensaje) {

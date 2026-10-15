@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Super Scheduler
 // @namespace    super-scheduler
-// @version      1.18
+// @version      1.19
 // @description  Appointment scheduling monitor
 // @match        https://agendamiento.dian.gov.co/*
 // @run-at       document-idle
@@ -188,22 +188,9 @@
                     'div[tipo="Control"][pantalla="PasoCuatro"][nombre="btnAgendarCita"]',
                 espera: 200,
             },
-            // Paso irreversible: aquí la cita queda reservada. Comparte clase con
-            // btnActualizarCita, así que se distingue por el atributo nombre.
-            {
-                sel: 'div[tipo="Control"][pantalla="PasoCuatro"][nombre="btnAgendarCita"]',
-                desc: 'Agendar cita',
-                esperaHasta:
-                    'div[tipo="Control"][pantalla="ModalInfoCita"][nombre="btnAceptar"]',
-                espera: 200,
-            },
-            // Confirmación. Hay un btnAceptar por modal, de ahí el filtro por pantalla.
-            {
-                sel: 'div[tipo="Control"][pantalla="ModalInfoCita"][nombre="btnAceptar"]',
-                desc: 'Entendido',
-                // El modal solo aparece cuando la cita ya quedó reservada.
-                marcarCliente: true,
-            },
+            // Clic en Agendar: ModalInfoCita (éxito) o ModalError de máximo de citas
+            // (cliente ya agendó por su cuenta → scheduled sin date/hour).
+            { accion: 'agendarCita', desc: 'Agendar cita' },
         ],
 
         // Selectores del par calendario + horas del PasoDos.
@@ -242,6 +229,10 @@
         // Aviso que muestra la página cuando la combinación elegida no tiene cupo.
         // Se compara sin tildes, sin mayúsculas y con los espacios colapsados.
         textoSinCupo: 'No se encontraron especialidades relacionadas según los filtros seleccionados',
+
+        // Tras Agendar: el cliente ya tiene el tope de citas del día (agendó por fuera).
+        textoMaxCitasDia:
+            'El usuario excedió el número máximo de citas por día para el mismo servicio',
 
         sinEspecialidades: {
             // El aviso sale en la pantalla ModalError, que es genérica; el botón se
@@ -514,30 +505,50 @@
         };
     }
 
-    async function marcarAgendado() {
+    async function marcarAgendado(opts = {}) {
         if (!clienteActual) return;
         const lista = cargarClientes();
         const cliente = lista.find((c) => String(c.cedula) === String(clienteActual.cedula));
         if (!cliente) return;
 
-        const cita = leerResumenCita();
+        const sinFechaHora = !!opts.sinFechaHora;
+        const cita = sinFechaHora
+            ? {
+                  fecha: '',
+                  hora: '',
+                  tramite: (cliente.ciudadTramite || '').toString(),
+                  agendadoEn: new Date().toISOString(),
+                  motivo: opts.motivo || 'max_citas_dia',
+              }
+            : leerResumenCita();
+
         cliente.scheduled = true;
         cliente.cita = cita;
+        if (sinFechaHora) {
+            cliente.date = '';
+            cliente.hour = '';
+        }
         guardarClientes(lista);
         log(
-            `   ${cliente.cedula} agendado: ${cita.fecha || '?'} ${cita.hora || '?'} — ${
-                cita.tramite || cliente.ciudadTramite
-            }`,
+            sinFechaHora
+                ? `   ${cliente.cedula} marcado scheduled (sin date/hour): ${opts.motivo || 'ya tenía cita'}`
+                : `   ${cliente.cedula} agendado: ${cita.fecha || '?'} ${cita.hora || '?'} — ${
+                      cita.tramite || cliente.ciudadTramite
+                  }`,
         );
 
         try {
             await actualizarClienteSheet({
                 cedula: cliente.cedula,
                 scheduled: true,
-                date: cita.fecha,
-                hour: cita.hora,
+                date: sinFechaHora ? '' : cita.fecha,
+                hour: sinFechaHora ? '' : cita.hora,
             });
-            log('   Sheet actualizada (scheduled/date/hour)');
+            log(
+                sinFechaHora
+                    ? '   Sheet actualizada (scheduled=true, date/hour vacíos)'
+                    : '   Sheet actualizada (scheduled/date/hour)',
+            );
         } catch (e) {
             log('   no se pudo actualizar la Sheet: ' + e.message);
         }
@@ -578,8 +589,18 @@
         }
     }
 
+    // Agendar devolvió el tope diario: se marca scheduled y se pasa al siguiente.
+    class ClienteYaAgendado extends Error {
+        constructor(mensaje) {
+            super(mensaje);
+            this.name = 'ClienteYaAgendado';
+        }
+    }
+
     const esSinCupo = (e) => !!(e && (e instanceof SinCupo || e.name === 'SinCupo'));
     const esFinCola = (e) => !!(e && (e instanceof FinCola || e.name === 'FinCola'));
+    const esClienteYaAgendado = (e) =>
+        !!(e && (e instanceof ClienteYaAgendado || e.name === 'ClienteYaAgendado'));
 
     const dormir = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -649,31 +670,41 @@
         return false;
     }
 
-    // Botón Aceptar del ModalError visible = el aviso de sin cupo ya está en pantalla.
-    // No usar solo body.innerText: tras cerrar el modal el texto puede quedar en el DOM.
-    function hayModalSinCupo() {
-        const sel = CONFIG.sinEspecialidades && CONFIG.sinEspecialidades.selAceptar;
-        if (sel) {
-            const btn = Array.from(document.querySelectorAll(sel)).find(visibleEnPantalla);
-            if (btn) return true;
-        }
-        if (!pantallaOverlayVisible('ModalError')) return false;
-        const aviso = normalizar(CONFIG.textoSinCupo);
-        if (!aviso) return true;
+    function textoModalErrorVisible() {
+        if (!pantallaOverlayVisible('ModalError')) return '';
         const modal = document.querySelector('div[nombrepantalla="ModalError"]');
-        return !!(modal && normalizar(modal.innerText || '').includes(aviso));
+        return normalizar((modal && modal.innerText) || '');
+    }
+
+    // Solo el aviso de especialidades — no cualquier ModalError (p. ej. máximo de citas).
+    function hayModalSinCupo() {
+        const aviso = normalizar(CONFIG.textoSinCupo);
+        if (!aviso) return false;
+        return textoModalErrorVisible().includes(aviso);
+    }
+
+    function hayModalMaxCitasDia() {
+        const aviso = normalizar(CONFIG.textoMaxCitasDia || '');
+        if (!aviso) return false;
+        return textoModalErrorVisible().includes(aviso);
+    }
+
+    async function cerrarModalError() {
+        const sel =
+            (CONFIG.sinEspecialidades && CONFIG.sinEspecialidades.selAceptar) ||
+            'div[tipo="Control"][pantalla="ModalError"][nombre="btnAceptar"]';
+        const aceptar =
+            Array.from(document.querySelectorAll(sel)).find(visibleEnPantalla) || document.querySelector(sel);
+        if (!aceptar) return false;
+        log('   cerrando ModalError');
+        clicar(resolverObjetivo(aceptar));
+        await dormir(CONFIG.pausaEntrePasosMs);
+        await esperarSinCarga(5000, { lanzarSinCupo: false });
+        return true;
     }
 
     async function cerrarAvisoSinCupo(motivo) {
-        const sel = CONFIG.sinEspecialidades && CONFIG.sinEspecialidades.selAceptar;
-        const aceptar =
-            (sel && Array.from(document.querySelectorAll(sel)).find(visibleEnPantalla)) ||
-            (sel && document.querySelector(sel));
-        if (aceptar) {
-            log('   cerrando el aviso');
-            clicar(resolverObjetivo(aceptar));
-            await dormir(CONFIG.pausaEntrePasosMs);
-        }
+        await cerrarModalError();
         throw new SinCupo(motivo || 'no hay especialidades para el trámite');
     }
 
@@ -1107,6 +1138,11 @@
             return true;
         }
 
+        if (paso.accion === 'agendarCita') {
+            await agendarCitaYConfirmar();
+            return true;
+        }
+
         const el = await esperarElemento(paso.sel, paso.contiene, CONFIG.timeoutElementoMs);
         if (!el) {
             if (paso.opcional) {
@@ -1174,12 +1210,54 @@
             // El title de los días del calendario dice la fecha completa, útil
             // para saber después qué quedó elegido.
             if (el.title) log(`   ${el.title}`);
-            if (paso.marcarCliente) await marcarAgendado();
             clicar(resolverObjetivo(el));
         }
 
         await estabilizarTrasPaso(paso);
         return true;
+    }
+
+    // Tras Agendar: éxito (ModalInfoCita) o tope diario (ModalError) si ya tenía cita.
+    async function agendarCitaYConfirmar() {
+        const selAgendar =
+            'div[tipo="Control"][pantalla="PasoCuatro"][nombre="btnAgendarCita"]';
+        const selOk =
+            'div[tipo="Control"][pantalla="ModalInfoCita"][nombre="btnAceptar"]';
+
+        const boton = await esperarElemento(selAgendar, null, CONFIG.timeoutElementoMs);
+        if (!boton) throw new Error('No apareció Agendar cita');
+
+        boton.scrollIntoView({ block: 'center' });
+        clicar(resolverObjetivo(boton));
+        log('   clic en Agendar cita');
+
+        const limite = Date.now() + CONFIG.timeoutElementoMs;
+        while (Date.now() < limite) {
+            if (hayModalMaxCitasDia()) {
+                log('   ModalError: máximo de citas por día');
+                await marcarAgendado({
+                    sinFechaHora: true,
+                    motivo: 'max_citas_dia',
+                });
+                await cerrarModalError();
+                throw new ClienteYaAgendado(
+                    'cliente ya tenía el máximo de citas; marcado scheduled sin fecha/hora',
+                );
+            }
+
+            const ok = buscar(selOk) || Array.from(document.querySelectorAll(selOk)).find(visibleEnPantalla);
+            if (ok) {
+                await marcarAgendado();
+                clicar(resolverObjetivo(ok));
+                log('   cita confirmada (ModalInfoCita)');
+                await esperarSinCarga(8000, { lanzarSinCupo: false });
+                await dormir(CONFIG.esperaTrasClicMs ?? 200);
+                return true;
+            }
+
+            await dormir(150);
+        }
+        throw new Error('No apareció confirmación ni aviso de máximo de citas');
     }
 
     // ───────────────────────────── DETECCIÓN Y ALARMA ─────────────────────────
@@ -1420,6 +1498,28 @@
                 softSeguidos = 0;
                 guardarEstado({ activo: false, ejecutando: false, ultimo: e.message });
                 pintar(e.message, true);
+                refrescarBoton();
+                return;
+            }
+            // Tope diario: ya se marcó scheduled en Sheet; mismo camino que éxito.
+            if (esClienteYaAgendado(e)) {
+                softSeguidos = 0;
+                resultado = e.message;
+                exito = true;
+                const quedanYa = cargarClientes().some((c) => !c.scheduled);
+                if (quedanYa) {
+                    const segundos = CONFIG.segundosAntesDelSiguienteCliente;
+                    guardarEstado({ activo: true, ejecutando: false, ultimo: resultado });
+                    refrescarBoton();
+                    pintar(
+                        `Ciclo ${estado.ciclos}: ${resultado}. Siguiente cliente en ${segundos} s.`,
+                        true,
+                    );
+                    programarSiguiente(segundos * 1000, { soft: false });
+                    return;
+                }
+                guardarEstado({ activo: false, ejecutando: false, ultimo: resultado });
+                pintar(`Ciclo ${estado.ciclos}: ${resultado}. No quedan pendientes.`, true);
                 refrescarBoton();
                 return;
             }

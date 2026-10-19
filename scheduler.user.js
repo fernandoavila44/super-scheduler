@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Super Scheduler
 // @namespace    super-scheduler
-// @version      1.19
+// @version      1.20
 // @description  Appointment scheduling monitor
 // @match        https://agendamiento.dian.gov.co/*
 // @run-at       document-idle
@@ -55,7 +55,9 @@
         },
 
         // Tiempo entre ciclos cuando no hay cupo (o tras un fallo recuperable).
+        // El valor activo se elige en el dropdown del panel y se guarda en localStorage.
         intervaloSegundos: 30,
+        intervalosSegundos: [5, 15, 30, 45, 60],
 
         // Tras agendar, si quedan clientes, espera esto y vuelve a empezar.
         segundosAntesDelSiguienteCliente: 8,
@@ -252,9 +254,9 @@
     const CLAVE_CLIENTES = 'ssMonitorClientes';
     const CLAVE_SHEET_URL = 'ssSheetUrl';
     const CLAVE_HOJA = 'ssSheetHoja';
+    const CLAVE_INTERVALO = 'ssIntervaloSegundos';
     // Últimas líneas de diagnóstico (consola + localStorage). No es un archivo.
     const CLAVE_LOG = 'ssMonitorLog';
-    const INTERVALO_MS = CONFIG.intervaloSegundos * 1000;
 
     // Contador en memoria: el soft-retry no recarga, así que no hace falta persistirlo.
     let softSeguidos = 0;
@@ -265,6 +267,16 @@
 
     // Nombre de la pestaña / ciudad a la que apunta este PC.
     const nombreHoja = () => (CONFIG.sheet.hoja || localStorage.getItem(CLAVE_HOJA) || '').trim();
+
+    // Periodicidad del reintento (dropdown del panel → localStorage).
+    function intervaloSegundos() {
+        const permitidos = CONFIG.intervalosSegundos || [5, 15, 30, 45, 60];
+        const guardado = Number(localStorage.getItem(CLAVE_INTERVALO));
+        if (permitidos.includes(guardado)) return guardado;
+        const def = Number(CONFIG.intervaloSegundos) || 30;
+        return permitidos.includes(def) ? def : permitidos[0];
+    }
+    const intervaloMs = () => intervaloSegundos() * 1000;
 
     // Caché por ciudad para no mezclar Bogotá con Medellín al cambiar de hoja.
     const claveClientes = () => {
@@ -1443,7 +1455,7 @@
 
         let resultado;
         let exito = false;
-        let esperaMs = INTERVALO_MS;
+        let esperaMs = intervaloMs();
         let fueSinCupo = false;
         try {
             let pasos = CONFIG.pasos;
@@ -1555,7 +1567,7 @@
         programarSiguiente(esperaMs, { soft: usarSoft });
     }
 
-    function programarSiguiente(esperaMs = INTERVALO_MS, { soft = false } = {}) {
+    function programarSiguiente(esperaMs = intervaloMs(), { soft = false } = {}) {
         guardarEstado({
             ejecutando: false,
             proximo: Date.now() + esperaMs,
@@ -1664,6 +1676,30 @@
             pintar(limpia ? `Ciudad/hoja: ${limpia}` : 'Ciudad/hoja borrada.');
         };
 
+        const selectIntervalo = document.createElement('select');
+        selectIntervalo.style.cssText =
+            'cursor:pointer;padding:4px 8px;border:1px solid #666;border-radius:4px;background:#f3f3f3;max-width:100px';
+        selectIntervalo.title = 'Periodicidad entre reintentos';
+        for (const segs of CONFIG.intervalosSegundos || [5, 15, 30, 45, 60]) {
+            const op = document.createElement('option');
+            op.value = String(segs);
+            op.textContent = `${segs} s`;
+            selectIntervalo.appendChild(op);
+        }
+        selectIntervalo.value = String(intervaloSegundos());
+        selectIntervalo.onchange = () => {
+            const segs = Number(selectIntervalo.value);
+            localStorage.setItem(CLAVE_INTERVALO, String(segs));
+            pintar(`Reintento cada ${segs} s.`);
+            // Si hay una espera en curso, reprograma con el nuevo intervalo.
+            const est = leerEstado();
+            if (est.activo && !est.ejecutando && timerReintento) {
+                clearTimeout(timerReintento);
+                timerReintento = null;
+                programarSiguiente(intervaloMs(), { soft: !!est.reintentoSoft });
+            }
+        };
+
         refrescarBoton = () => {
             boton.textContent = leerEstado().activo ? 'Detener' : 'Iniciar';
         };
@@ -1688,7 +1724,7 @@
         };
 
         refrescarBoton();
-        botones.append(boton, botonExportar, botonSheet, selectCiudad);
+        botones.append(boton, botonExportar, botonSheet, selectCiudad, selectIntervalo);
         $panel.append(titulo, $estado, botones);
         document.body.appendChild($panel);
     }

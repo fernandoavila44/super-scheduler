@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Super Scheduler
 // @namespace    super-scheduler
-// @version      1.23
+// @version      1.24
 // @description  Appointment scheduling monitor
 // @match        https://agendamiento.dian.gov.co/*
 // @run-at       document-idle
@@ -69,7 +69,7 @@
         intervalosSegundos: [5, 15, 30, 45, 60],
 
         // Tras agendar, si quedan clientes, espera esto y vuelve a empezar.
-        segundosAntesDelSiguienteCliente: 8,
+        segundosAntesDelSiguienteCliente: 0,
 
         // Margen alto: el sitio a veces tarda en pintar controles.
         timeoutElementoMs: 45000,
@@ -266,9 +266,12 @@
         // Se compara sin tildes, sin mayúsculas y con los espacios colapsados.
         textoSinCupo: 'No se encontraron especialidades relacionadas según los filtros seleccionados',
 
-        // Tras Agendar: el cliente ya tiene el tope de citas del día (agendó por fuera).
-        textoMaxCitasDia:
+        // Tras Agendar: el cliente ya tiene cita (agendó por fuera). Se marca
+        // scheduled sin date/hour y se sigue con el siguiente, sin alarma.
+        textosClienteConCita: [
             'El usuario excedió el número máximo de citas por día para el mismo servicio',
+            'El usuario excedió el número máximo de citas solicitadas abiertas',
+        ],
 
         sinEspecialidades: {
             // El aviso sale en la pantalla ModalError, que es genérica; el botón se
@@ -789,10 +792,11 @@
         return textoModalErrorVisible().includes(aviso);
     }
 
+    // Devuelve el aviso de "cliente ya tiene cita" que esté en pantalla, o ''.
     function hayModalMaxCitasDia() {
-        const aviso = normalizar(CONFIG.textoMaxCitasDia || '');
-        if (!aviso) return false;
-        return textoModalErrorVisible().includes(aviso);
+        const texto = textoModalErrorVisible();
+        if (!texto) return '';
+        return (CONFIG.textosClienteConCita || []).find((t) => texto.includes(normalizar(t))) || '';
     }
 
     async function cerrarModalError() {
@@ -1525,12 +1529,13 @@
         const limite = Date.now() + CONFIG.timeoutElementoMs;
         let limiteAyuda = 0;
         for (;;) {
-            if (hayModalMaxCitasDia()) {
-                if (limiteAyuda) pararAlarma();
-                log('   ModalError: máximo de citas por día');
+            const yaTieneCita = hayModalMaxCitasDia();
+            if (yaTieneCita) {
+                pararAlarma();
+                log(`   ModalError: ${yaTieneCita}`);
                 await marcarAgendado({
                     sinFechaHora: true,
-                    motivo: 'max_citas_dia',
+                    motivo: normalizar(yaTieneCita).includes('abiertas') ? 'max_citas_abiertas' : 'max_citas_dia',
                 });
                 await cerrarModalError();
                 throw new ClienteYaAgendado(

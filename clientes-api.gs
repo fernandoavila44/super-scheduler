@@ -76,6 +76,13 @@ function schedule_(datos) {
   ctx.hoja.getRange(fila, ctx.iScheduled + 1).setValue(scheduled);
   ctx.hoja.getRange(fila, ctx.iDate + 1).setValue(textoCelda_(datos.date));
   ctx.hoja.getRange(fila, ctx.iHour + 1).setValue(textoCelda_(datos.hour));
+  // name/email son opcionales: si la columna no existe, se ignoran.
+  if (ctx.iName >= 0 && datos.name !== undefined) {
+    ctx.hoja.getRange(fila, ctx.iName + 1).setValue(textoCelda_(datos.name));
+  }
+  if (ctx.iEmail >= 0 && datos.email !== undefined) {
+    ctx.hoja.getRange(fila, ctx.iEmail + 1).setValue(textoCelda_(datos.email));
+  }
 
   return json_({
     ok: true,
@@ -84,6 +91,8 @@ function schedule_(datos) {
     scheduled: scheduled,
     date: textoCelda_(datos.date),
     hour: textoCelda_(datos.hour),
+    name: ctx.iName >= 0 ? textoCelda_(datos.name) : null,
+    email: ctx.iEmail >= 0 ? textoCelda_(datos.email) : null,
   });
 }
 
@@ -133,6 +142,8 @@ function hojaConIndices_(nombreHoja) {
     iScheduled: headers.indexOf('scheduled'),
     iDate: headers.indexOf('date'),
     iHour: headers.indexOf('hour'),
+    iName: headers.indexOf('name'),
+    iEmail: headers.indexOf('email'),
   };
 }
 

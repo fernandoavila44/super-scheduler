@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Super Scheduler (sandbox)
 // @namespace    super-scheduler
-// @version      1.22-sandbox
+// @version      1.23-sandbox
 // @description  [SANDBOX] Appointment scheduling monitor
 // @match        https://agendamiento.dian.gov.co/*
 // @run-at       document-idle
@@ -198,8 +198,6 @@
                 esperaHasta:
                     'div[tipo="Control"][pantalla="PasoCuatro"][nombre="btnAgendarCita"]',
                 espera: 200,
-                // Aquí se envía el token: si caducó, hay que marcarlo de nuevo antes.
-                requiereCaptcha: true,
             },
             // Clic en Agendar: ModalInfoCita (éxito) o ModalError de máximo de citas
             // (cliente ya agendó por su cuenta → scheduled sin date/hour).
@@ -1150,6 +1148,7 @@
 
         detener('¡CUPOS! Marca el captcha y el script sigue solo.');
         log('captcha en pantalla → alarma y título CUPOS');
+        marcarTerminosTemprano();
 
         const limite = Date.now() + timeoutMs;
         while (Date.now() < limite) {
@@ -1157,13 +1156,25 @@
             if (token && token.value) {
                 pararAlarma();
                 log('captcha resuelto, continuando');
-                vigilarCaptcha();
                 return true;
             }
-            await dormir(500);
+            await dormir(100);
         }
         pararAlarma();
         throw new Error('el captcha no se resolvió a tiempo');
+    }
+
+    // El check de términos ya está en pantalla junto al captcha: se marca mientras
+    // la persona resuelve el captcha para no gastar ese tiempo después.
+    function marcarTerminosTemprano() {
+        const el = primeroVisible('div[nombrecontrol="TerminosCondiciones"] input[type="checkbox"]');
+        if (!el || el.checked) return;
+        clicar(el);
+        if (!el.checked) {
+            el.checked = true;
+            disparar(el, ['input', 'change']);
+        }
+        log('   términos marcados antes del captcha');
     }
 
     // ───────────────────────────── FASE FINAL ─────────────────────────────────
@@ -1179,11 +1190,6 @@
             if (el) return el;
         }
         return null;
-    }
-
-    function tokenCaptcha() {
-        const token = document.querySelector(CONFIG.captcha.selToken);
-        return !!(token && token.value);
     }
 
     // Texto de un ModalError que no sea el de máximo de citas (ese tiene su manejo).
@@ -1213,59 +1219,6 @@
         throw new Error(`${motivo} (sin respuesta en ${Math.round(esperaPersonaMs / 60000)} min)`);
     }
 
-    let detenerVigiaCaptcha = () => {};
-
-    // reCAPTCHA invalida el token a los ~2 min y vacía el textarea. Mientras se
-    // completa el PasoTres se avisa en cuanto pasa; al llegar al PasoCuatro el
-    // token ya se envió y la vigilancia se apaga.
-    function vigilarCaptcha() {
-        detenerVigiaCaptcha();
-        const selPasoTres = [
-            'div[tipo="Control"][pantalla="PasoTres"][nombre="btnSiguiente"]',
-            'div[tipo="Control"][pantalla="PasoTres"][nombre="btnSiguienteBlock"]',
-            '#divPasoTresNumeroDocumento input',
-        ];
-        let vacios = 0;
-        let avisando = false;
-        const apagar = () => {
-            clearInterval(id);
-            if (avisando) pararAlarma();
-            detenerVigiaCaptcha = () => {};
-        };
-        const id = setInterval(() => {
-            if (primeroVisible(SEL_AGENDAR)) {
-                apagar();
-                return;
-            }
-            if (tokenCaptcha()) {
-                vacios = 0;
-                if (avisando) {
-                    avisando = false;
-                    pararAlarma();
-                    log('captcha marcado de nuevo');
-                }
-                return;
-            }
-            // Dos lecturas seguidas y fuera de cargas: evita falsas alarmas
-            // mientras la página procesa el envío.
-            if (estaCargando() || !primeroVisible(selPasoTres)) return;
-            vacios++;
-            if (vacios >= 2 && !avisando) {
-                avisando = true;
-                pararAlarma();
-                alarma('El captcha caducó: márcalo de nuevo');
-                pintar('El captcha caducó: márcalo de nuevo y el script sigue solo.', true);
-                log('captcha caducado');
-            }
-        }, 1000);
-        detenerVigiaCaptcha = apagar;
-    }
-
-    async function asegurarCaptchaVigente() {
-        if (tokenCaptcha() || !captchaUiPresente()) return;
-        await pedirAyuda('El captcha caducó: márcalo de nuevo', tokenCaptcha);
-    }
-
     // Clic que debe llevar a la pantalla siguiente (paso.esperaHasta). Si no
     // avanza, se repite el clic; si tras timeoutMs sigue igual, se pide ayuda.
     async function clicHastaAvanzar(paso) {
@@ -1286,10 +1239,9 @@
             }
             const el = primeroVisible(paso.sel);
             if (!el) {
-                await dormir(200);
+                await dormir(100);
                 continue;
             }
-            if (paso.requiereCaptcha) await asegurarCaptchaVigente();
             clics++;
             if (clics > 1) log(`   ${desc} no avanzó; clic ${clics}`);
             el.scrollIntoView({ block: 'center' });
@@ -1554,7 +1506,6 @@
         const selOk =
             'div[tipo="Control"][pantalla="ModalInfoCita"][nombre="btnAceptar"]';
 
-        detenerVigiaCaptcha();
         let boton = await esperarElemento(SEL_AGENDAR, null, CONFIG.timeoutElementoMs);
         if (!boton) {
             await pedirAyuda('No apareció Agendar cita', () => !!primeroVisible(SEL_AGENDAR));
@@ -1890,8 +1841,6 @@
             resultado = fueSinCupo ? `sin cupo (${e.message})` : `falló: ${e.message}`;
             if (!fueSinCupo) softSeguidos = 0;
             log(`fin ciclo: ${resultado}${fueSinCupo ? ' [SinCupo→soft]' : ' [error→recarga]'}`);
-        } finally {
-            detenerVigiaCaptcha();
         }
 
         // El paso del captcha detiene el monitor en cuanto confirma que hay cita,

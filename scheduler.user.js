@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Super Scheduler (sandbox)
 // @namespace    super-scheduler
-// @version      1.26-sandbox
+// @version      1.27-sandbox
 // @description  [SANDBOX] Appointment scheduling monitor
 // @match        https://agendamiento.dian.gov.co/*
 // @run-at       document-idle
@@ -1212,24 +1212,13 @@
         return ((modal && modal.innerText) || 'aviso de error').replace(/\s+/g, ' ').trim();
     }
 
-    // Suena la alarma y espera a que la persona destrabe la página (listo() true).
-    async function pedirAyuda(motivo, listo) {
-        const { esperaPersonaMs } = CONFIG.faseFinal;
-        pararAlarma();
-        alarma(motivo);
-        pintar(`${motivo}. Resuélvelo en la página; el script sigue solo.`, true);
-        log(`pidiendo ayuda: ${motivo}`);
-        const limite = Date.now() + esperaPersonaMs;
-        while (Date.now() < limite) {
-            if (listo()) {
-                pararAlarma();
-                log('   destrabado, continuando');
-                return true;
-            }
-            await dormir(500);
-        }
-        pararAlarma();
-        throw new Error(`${motivo} (sin respuesta en ${Math.round(esperaPersonaMs / 60000)} min)`);
+    // La página se trabó en un paso final: sin alarma, se enciende de nuevo el
+    // monitor (detener() lo apagó en el captcha) y el ciclo recarga y reintenta;
+    // el cliente sigue pendiente.
+    function fallaFaseFinal(motivo) {
+        guardarEstado({ activo: true });
+        refrescarBoton();
+        return new Error(motivo);
     }
 
     // Clic que debe llevar a la pantalla siguiente (paso.esperaHasta). Si no
@@ -1268,7 +1257,7 @@
                 await dormir(200);
             }
         }
-        if (!avanzo()) await pedirAyuda(`${desc} no avanza`, avanzo);
+        if (!avanzo()) throw fallaFaseFinal(`${desc} no avanza`);
         await dormir(paso.espera ?? CONFIG.esperaTrasClicMs ?? 200);
     }
 
@@ -1284,8 +1273,7 @@
             return await ejecutarPaso(paso);
         } catch (e) {
             if (esSinCupo(e) || esClienteYaAgendado(e)) throw e;
-            await pedirAyuda(`${paso.desc || paso.sel}: ${e.message}`, () => !!primeroVisible(paso.sel));
-            return ejecutarPaso(paso);
+            throw fallaFaseFinal(`${paso.desc || paso.sel}: ${e.message}`);
         }
     }
 
@@ -1386,7 +1374,7 @@
             await esperarSinCarga();
             if (await esperarCualquiera(selRespuesta, reintentoMs * 2)) return;
         }
-        if (!respondio()) await pedirAyuda('La consulta del documento no responde', respondio);
+        if (!respondio()) throw fallaFaseFinal('La consulta del documento no responde');
     }
 
     // Al elegir el trámite la página puede responder con el modal de que no hay
@@ -1522,11 +1510,8 @@
         const selOk =
             'div[tipo="Control"][pantalla="ModalInfoCita"][nombre="btnAceptar"]';
 
-        let boton = await esperarElemento(SEL_AGENDAR, null, CONFIG.timeoutElementoMs);
-        if (!boton) {
-            await pedirAyuda('No apareció Agendar cita', () => !!primeroVisible(SEL_AGENDAR));
-            boton = primeroVisible(SEL_AGENDAR);
-        }
+        const boton = await esperarElemento(SEL_AGENDAR, null, CONFIG.timeoutElementoMs);
+        if (!boton) throw fallaFaseFinal('No apareció Agendar cita');
 
         datosPersonaActual = leerDatosPersona();
         log(`   datos: ${datosPersonaActual.nombre || '?'} / ${datosPersonaActual.correo || '?'}`);

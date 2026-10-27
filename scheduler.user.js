@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Super Scheduler (sandbox)
 // @namespace    super-scheduler
-// @version      1.24-sandbox
+// @version      1.25-sandbox
 // @description  [SANDBOX] Appointment scheduling monitor
 // @match        https://agendamiento.dian.gov.co/*
 // @run-at       document-idle
@@ -1152,12 +1152,16 @@
 
         detener('¡CUPOS! Marca el captcha y el script sigue solo.');
         log('captcha en pantalla → alarma y título CUPOS');
-        marcarTerminosTemprano();
 
         const limite = Date.now() + timeoutMs;
+        let tarde = false;
         while (Date.now() < limite) {
+            if (!tarde) tarde = marcarTerminosTemprano();
             const token = document.querySelector(selToken);
-            if (token && token.value) {
+            // Sin recargar entre clientes, el token del cliente anterior podría
+            // seguir en el textarea: solo cuenta uno nuevo.
+            if (token && token.value && token.value !== tokenCaptchaUsado) {
+                tokenCaptchaUsado = token.value;
                 pararAlarma();
                 log('captcha resuelto, continuando');
                 return true;
@@ -1170,16 +1174,21 @@
 
     // El check de términos ya está en pantalla junto al captcha: se marca mientras
     // la persona resuelve el captcha para no gastar ese tiempo después.
+    // Devuelve true cuando el check ya quedó marcado.
     function marcarTerminosTemprano() {
         const el = primeroVisible('div[nombrecontrol="TerminosCondiciones"] input[type="checkbox"]');
-        if (!el || el.checked) return;
+        if (!el) return false;
+        if (el.checked) return true;
         clicar(el);
         if (!el.checked) {
             el.checked = true;
             disparar(el, ['input', 'change']);
         }
         log('   términos marcados antes del captcha');
+        return true;
     }
+
+    let tokenCaptchaUsado = '';
 
     // ───────────────────────────── FASE FINAL ─────────────────────────────────
 
@@ -1714,7 +1723,14 @@
 
     // Prepara el DOM para reintentar sin recargar.
     // Devuelve 'categoria' | 'inicio' | null (null = no queda más que recargar).
-    async function prepararReintentoSuave() {
+    async function prepararReintentoSuave({ trasAgendar = false } = {}) {
+        if (trasAgendar) {
+            // Tras Aceptar la página vuelve sola al inicio; se le da un momento
+            // para pintarlo antes de dar el DOM por perdido y recargar.
+            await esperarSinCarga(10000, { lanzarSinCupo: false });
+            await esperarCualquiera(['div[nombrecontrol="btnSolicitarCita"]'], 8000);
+            if (inicioVisible()) return 'inicio';
+        }
         await descartarModalErrorSiHay();
         if (categoriaVisible()) return 'categoria';
 
@@ -1762,7 +1778,7 @@
         try {
             let pasos = CONFIG.pasos;
             if (soft) {
-                const desde = await prepararReintentoSuave();
+                const desde = await prepararReintentoSuave({ trasAgendar: !!opts.trasAgendar });
                 if (!desde) {
                     recargarInicio('reintento suave: DOM no recuperable → recarga');
                     return;
@@ -1800,17 +1816,9 @@
 
             // detener() apagó el monitor al llegar al captcha para no recargar el
             // formulario. Con la cita ya hecha, si queda gente en la cola se enciende
-            // otra vez y el siguiente ciclo arranca desde el inicio (recarga: el
-            // formulario ya se consumió).
-            const quedan = cargarClientes().some((c) => !c.scheduled);
-            if (quedan) {
-                const segundos = CONFIG.segundosAntesDelSiguienteCliente;
-                guardarEstado({ activo: true, ejecutando: false, ultimo: resultado });
-                refrescarBoton();
-                pintar(`Ciclo ${estado.ciclos}: ${resultado}. Siguiente cliente en ${segundos} s.`, true);
-                programarSiguiente(segundos * 1000, { soft: false });
-                return;
-            }
+            // otra vez; tras Aceptar la página vuelve sola al inicio, así que se
+            // sigue sin recargar.
+            if (seguirConSiguienteCliente(estado, resultado)) return;
             resultado = 'cita agendada. No quedan clientes pendientes';
         } catch (e) {
             if (esFinCola(e)) {
@@ -1825,18 +1833,7 @@
                 softSeguidos = 0;
                 resultado = e.message;
                 exito = true;
-                const quedanYa = cargarClientes().some((c) => !c.scheduled);
-                if (quedanYa) {
-                    const segundos = CONFIG.segundosAntesDelSiguienteCliente;
-                    guardarEstado({ activo: true, ejecutando: false, ultimo: resultado });
-                    refrescarBoton();
-                    pintar(
-                        `Ciclo ${estado.ciclos}: ${resultado}. Siguiente cliente en ${segundos} s.`,
-                        true,
-                    );
-                    programarSiguiente(segundos * 1000, { soft: false });
-                    return;
-                }
+                if (seguirConSiguienteCliente(estado, resultado)) return;
                 guardarEstado({ activo: false, ejecutando: false, ultimo: resultado });
                 pintar(`Ciclo ${estado.ciclos}: ${resultado}. No quedan pendientes.`, true);
                 refrescarBoton();
@@ -1874,7 +1871,20 @@
         programarSiguiente(esperaMs, { soft: usarSoft });
     }
 
-    function programarSiguiente(esperaMs = intervaloMs(), { soft = false } = {}) {
+    // Tras agendar (o tras el aviso de que el cliente ya tenía cita) se enciende
+    // de nuevo el monitor y se sigue sin recargar. Devuelve false si no quedan.
+    function seguirConSiguienteCliente(estado, resultado) {
+        if (!cargarClientes().some((c) => !c.scheduled)) return false;
+        softSeguidos = 0;
+        const segundos = CONFIG.segundosAntesDelSiguienteCliente;
+        guardarEstado({ activo: true, ejecutando: false, ultimo: resultado });
+        refrescarBoton();
+        pintar(`Ciclo ${estado.ciclos}: ${resultado}. Siguiente cliente en ${segundos} s.`, true);
+        programarSiguiente(segundos * 1000, { soft: true, trasAgendar: true });
+        return true;
+    }
+
+    function programarSiguiente(esperaMs = intervaloMs(), { soft = false, trasAgendar = false } = {}) {
         guardarEstado({
             ejecutando: false,
             proximo: Date.now() + esperaMs,
@@ -1886,7 +1896,7 @@
             if (!leerEstado().activo) return;
             if (soft) {
                 log('disparo reintento suave (sin location.href)');
-                ejecutarCiclo({ soft: true });
+                ejecutarCiclo({ soft: true, trasAgendar });
             } else {
                 recargarInicio('disparo reintento con recarga');
             }

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Super Scheduler (sandbox)
 // @namespace    super-scheduler
-// @version      1.20-sandbox
+// @version      1.21-sandbox
 // @description  [SANDBOX] Appointment scheduling monitor
 // @match        https://agendamiento.dian.gov.co/*
 // @run-at       document-idle
@@ -207,9 +207,20 @@
             selDia:
                 'div[nombrecontrol="Calendario"] td.k-calendar-td:not(.k-disabled):not(.k-other-month) a.k-link',
             selHoras: 'div[nombrecontrol="Horas"] select.customSelect',
+            // Solo se muestra habilitado cuando el player aceptó la hora.
+            selSiguiente: 'div[tipo="Control"][pantalla="PasoDos"][nombre="btnSiguiente"]',
+            // Cuánto esperar a que el calendario se despliegue tras el clic.
+            timeoutCalendarioMs: 15000,
+            // Cuánto esperar a que el calendario pinte días habilitados.
+            timeoutDiasMs: 10000,
             // Cuánto esperar las horas de un día antes de descartarlo y probar el
             // siguiente. Margen alto: a veces el texto aparece antes que el value.
-            timeoutHorasMs: 12000,
+            timeoutHorasMs: 20000,
+            // Tras elegir la hora, cuánto esperar la confirmación del player
+            // (hora seleccionada o Siguiente habilitado) antes de reintentar.
+            confirmarHoraMs: 5000,
+            // Veces que se vuelve a aplicar la hora si el player rehízo el select.
+            intentosHora: 3,
         },
 
         captcha: {
@@ -435,7 +446,7 @@
     }
 
     // GET con action=schedule (más fiable que POST con los redirects de Apps Script).
-    function actualizarClienteSheet({ cedula, date, hour, scheduled = true }) {
+    function actualizarClienteSheet({ cedula, date, hour, name, email, scheduled = true }) {
         const base = urlSheet();
         const hoja = nombreHoja();
         if (!base) return Promise.reject(new Error('no hay URL de Sheet configurada'));
@@ -448,6 +459,8 @@
             scheduled: scheduled ? 'true' : 'false',
             date: date || '',
             hour: hour || '',
+            name: name || '',
+            email: email || '',
         });
         return gmRequest({ method: 'GET', url: base + sep + qs.toString() }).then((data) => {
             if (!data || data.ok === false) throw new Error((data && data.error) || 'la Sheet rechazó la actualización');
@@ -503,7 +516,19 @@
 
     function textoPasoCuatro(nombre) {
         const el = document.querySelector(`div[tipo="Control"][pantalla="PasoCuatro"][nombre="${nombre}"]`);
-        return (el && (el.innerText || '').trim()) || '';
+        if (!el) return '';
+        return ((el.innerText || el.textContent || '').replace(/\s+/g, ' ')).trim();
+    }
+
+    // Nombre y correo tal como los muestra el PasoCuatro (ofuscados por habeas
+    // data). Se leen antes de Agendar, mientras la pantalla está visible.
+    let datosPersonaActual = { nombre: '', correo: '' };
+
+    function leerDatosPersona() {
+        return {
+            nombre: textoPasoCuatro('txtInfoNombres'),
+            correo: textoPasoCuatro('txtInfoCorreo'),
+        };
     }
 
     // El resumen de la cita vive en el PasoCuatro; al llegar al modal de éxito
@@ -534,8 +559,13 @@
               }
             : leerResumenCita();
 
+        const persona = datosPersonaActual.nombre || datosPersonaActual.correo
+            ? datosPersonaActual
+            : leerDatosPersona();
         cliente.scheduled = true;
         cliente.cita = cita;
+        cliente.name = persona.nombre;
+        cliente.email = persona.correo;
         if (sinFechaHora) {
             cliente.date = '';
             cliente.hour = '';
@@ -555,11 +585,13 @@
                 scheduled: true,
                 date: sinFechaHora ? '' : cita.fecha,
                 hour: sinFechaHora ? '' : cita.hora,
+                name: persona.nombre,
+                email: persona.correo,
             });
             log(
                 sinFechaHora
-                    ? '   Sheet actualizada (scheduled=true, date/hour vacíos)'
-                    : '   Sheet actualizada (scheduled/date/hour)',
+                    ? '   Sheet actualizada (scheduled=true, date/hour vacíos, name/email)'
+                    : '   Sheet actualizada (scheduled/date/hour/name/email)',
             );
         } catch (e) {
             log('   no se pudo actualizar la Sheet: ' + e.message);
@@ -877,7 +909,18 @@
     // habilitado en el calendario no garantiza horas libres. Se recorren los días
     // habilitados y se toma el primero que sí tenga horas.
     async function elegirFechaYHora() {
-        const { selBoton, selAbierto, selDia, selHoras, timeoutHorasMs } = CONFIG.fechaYHora;
+        const {
+            selBoton,
+            selAbierto,
+            selDia,
+            selHoras,
+            selSiguiente,
+            timeoutCalendarioMs,
+            timeoutDiasMs,
+            timeoutHorasMs,
+            confirmarHoraMs,
+            intentosHora,
+        } = CONFIG.fechaYHora;
 
         async function abrirCalendario() {
             // Un segundo clic con el calendario abierto lo cerraría, de ahí la
@@ -890,43 +933,87 @@
                 if (avisoSinCupo()) throw new SinCupo('la página avisó que no hay especialidades');
                 throw new Error('No apareció el botón de fecha');
             }
+            await esperarSinCarga();
             clicar(resolverObjetivo(boton));
-            if (!(await esperarElemento(selAbierto, null, 5000))) throw new Error('El calendario no se desplegó');
+            if (!(await esperarElemento(selAbierto, null, timeoutCalendarioMs))) {
+                throw new Error('El calendario no se desplegó');
+            }
         }
 
-        // Re-consulta el <select> en cada sondeo (el player puede recrearlo).
-        // No spamear clics: las options ya vienen en el DOM; abrir el combo cada
-        // 250 ms puede impedir que el value quede seleccionado.
-        async function esperarYElegirHora(timeout) {
-            const limite = Date.now() + timeout;
+        // El calendario puede pintarse antes de que lleguen los días con cupo.
+        async function esperarDiasHabilitados() {
+            const limite = Date.now() + timeoutDiasMs;
             while (Date.now() < limite) {
-                const select = buscar(selHoras);
-                if (select) {
-                    const opcion = Array.from(select.options).find(esOpcionHora);
-                    if (opcion) {
-                        select.focus();
-                        aplicarOpcionSelect(select, opcion);
-                        // Confirmar que el native select quedó en esa opción.
-                        const ok =
-                            select.selectedIndex === opcion.index ||
-                            (opcion.value && select.value === opcion.value);
-                        if (ok) return { select, opcion };
-                        log(`   hora no quedó seleccionada (index=${select.selectedIndex}, value="${select.value}")`);
-                    }
-                }
+                const dias = Array.from(document.querySelectorAll(selDia))
+                    .filter(visible)
+                    .map((a) => a.getAttribute('data-value'))
+                    .filter(Boolean);
+                if (dias.length) return dias;
                 await dormir(250);
             }
-            return { select: buscar(selHoras), opcion: null };
+            return [];
+        }
+
+        const horaSeleccionada = (select) => {
+            const o = select && select.options[select.selectedIndex];
+            return esOpcionHora(o) ? o : null;
+        };
+        const siguienteListo = () => !!buscar(selSiguiente);
+
+        // Re-consulta el <select> en cada sondeo (el player puede recrearlo).
+        // La hora se aplica una vez y se espera la confirmación del player: al
+        // disparar change rehace el select, y volver a aplicarla cada 250 ms lo
+        // mantenía en ese ciclo hasta agotar el tiempo.
+        async function esperarYElegirHora() {
+            const limite = Date.now() + timeoutHorasMs;
+            let aplicaciones = 0;
+            let ultimaTexto = '';
+            while (Date.now() < limite) {
+                await esperarSinCarga();
+                const select = buscar(selHoras);
+                const elegida = horaSeleccionada(select);
+                if (elegida && (aplicaciones > 0 || siguienteListo())) {
+                    return { select, opcion: elegida, texto: elegida.textContent.trim() };
+                }
+                if (aplicaciones > 0 && siguienteListo()) {
+                    return { select, opcion: elegida, texto: ultimaTexto };
+                }
+
+                const opcion = select && Array.from(select.options).find(esOpcionHora);
+                if (!opcion) {
+                    await dormir(250);
+                    continue;
+                }
+                if (aplicaciones >= intentosHora) break;
+
+                aplicaciones++;
+                ultimaTexto = opcion.textContent.trim();
+                log(`   aplicando hora ${ultimaTexto} (intento ${aplicaciones}/${intentosHora})`);
+                select.focus();
+                aplicarOpcionSelect(select, opcion);
+
+                const limiteConfirmar = Math.min(limite, Date.now() + confirmarHoraMs);
+                while (Date.now() < limiteConfirmar) {
+                    await dormir(200);
+                    const actual = buscar(selHoras);
+                    const ok = horaSeleccionada(actual);
+                    if (ok) return { select: actual, opcion: ok, texto: ok.textContent.trim() };
+                    if (siguienteListo()) return { select: actual, opcion: null, texto: ultimaTexto };
+                }
+                const actual = buscar(selHoras);
+                log(
+                    `   la hora no se confirmó (index=${actual ? actual.selectedIndex : '-'}, ` +
+                        `value="${actual ? actual.value : ''}")`,
+                );
+            }
+            return { select: buscar(selHoras), opcion: null, aplicaciones };
         }
 
         await abrirCalendario();
 
         // Se guardan los data-value y no los nodos porque el calendario se vuelve
         // a dibujar cada vez que se abre y las referencias quedarían obsoletas.
-        const dias = Array.from(document.querySelectorAll(selDia))
-            .filter(visible)
-            .map((a) => a.getAttribute('data-value'))
-            .filter(Boolean);
+        const dias = await esperarDiasHabilitados();
 
         if (!dias.length) throw new SinCupo('el calendario no tiene días habilitados');
         log(`   días habilitados: ${dias.length}`);
@@ -943,17 +1030,22 @@
 
             log(`   probando ${dia.title || valor}`);
             clicar(dia);
-            await esperarSinCarga(5000);
+            await esperarSinCarga();
             await dormir(CONFIG.esperaTrasClicMs ?? 200);
 
-            const { select, opcion } = await esperarYElegirHora(timeoutHorasMs);
-            if (opcion) {
-                log(`   hora elegida: ${opcion.textContent.trim()} (value="${opcion.value}")`);
+            const resultado = await esperarYElegirHora();
+            if (resultado.opcion || resultado.texto) {
+                const valorHora = resultado.opcion ? ` (value="${resultado.opcion.value}")` : '';
+                log(`   hora elegida: ${resultado.texto}${valorHora}`);
                 return true;
             }
 
-            ultimoDetalle = resumenOpcionesHoras(select);
-            log(`   ese día no tiene horas libres (${ultimoDetalle})`);
+            ultimoDetalle = resumenOpcionesHoras(resultado.select);
+            log(
+                resultado.aplicaciones
+                    ? `   el player no aceptó la hora tras ${resultado.aplicaciones} intento(s) (${ultimoDetalle})`
+                    : `   ese día no tiene horas libres (${ultimoDetalle})`,
+            );
         }
 
         throw new SinCupo(
@@ -1064,6 +1156,7 @@
             disparar(select, ['input', 'change']);
             select.blur();
             clienteActual = cliente;
+            datosPersonaActual = { nombre: '', correo: '' };
             log(`   cliente ${cliente.cedula}: ${hallado.opcion.textContent.trim()}`);
             return true;
         }
@@ -1238,6 +1331,9 @@
 
         const boton = await esperarElemento(selAgendar, null, CONFIG.timeoutElementoMs);
         if (!boton) throw new Error('No apareció Agendar cita');
+
+        datosPersonaActual = leerDatosPersona();
+        log(`   datos: ${datosPersonaActual.nombre || '?'} / ${datosPersonaActual.correo || '?'}`);
 
         boton.scrollIntoView({ block: 'center' });
         clicar(resolverObjetivo(boton));

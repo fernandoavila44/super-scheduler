@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Super Scheduler
 // @namespace    super-scheduler
-// @version      1.21
+// @version      1.22
 // @description  Appointment scheduling monitor
 // @match        https://agendamiento.dian.gov.co/*
 // @run-at       document-idle
@@ -52,6 +52,15 @@
             // Opciones del dropdown (deben coincidir con los nombres de las pestañas).
             ciudades: ['Bogota', 'Medellin', 'Cali'],
             timeoutMs: 15000,
+            // La lista guardada se usa sin consultar la Sheet si tiene menos de
+            // esto; si es más vieja, se refresca en segundo plano sin frenar el ciclo.
+            refrescoSegundos: 60,
+            // Más vieja que esto ya no se usa: el ciclo espera a la Sheet, para no
+            // reintentar a alguien que otro PC agendó mientras tanto.
+            edadMaximaCacheSegundos: 300,
+            // Un agendado local más reciente que esto no se revierte aunque la
+            // Sheet todavía no lo refleje (su escritura puede ir en camino).
+            proteccionAgendadoMs: 10 * 60 * 1000,
         },
 
         // Tiempo entre ciclos cuando no hay cupo (o tras un fallo recuperable).
@@ -189,6 +198,8 @@
                 esperaHasta:
                     'div[tipo="Control"][pantalla="PasoCuatro"][nombre="btnAgendarCita"]',
                 espera: 200,
+                // Aquí se envía el token: si caducó, hay que marcarlo de nuevo antes.
+                requiereCaptcha: true,
             },
             // Clic en Agendar: ModalInfoCita (éxito) o ModalError de máximo de citas
             // (cliente ya agendó por su cuenta → scheduled sin date/hour).
@@ -229,6 +240,20 @@
             selToken: '#g-recaptcha-response',
             // Margen para que llegues al navegador y lo marques.
             timeoutMs: 10 * 60 * 1000,
+        },
+
+        // Pasos posteriores al captcha: la cita ya está a la vista y recargar la
+        // perdería, así que en vez de abortar se insiste y luego se pide ayuda.
+        faseFinal: {
+            // Si un clic no hace avanzar la página en este tiempo, se repite.
+            // Mientras se ve la capa de carga no cuenta como "no avanzó".
+            reintentoMs: 8000,
+            // Cuánto se insiste solo antes de hacer sonar la alarma.
+            timeoutMs: 90000,
+            // Cuánto se espera a que la persona lo destrabe tras la alarma.
+            esperaPersonaMs: 5 * 60 * 1000,
+            // Veces que se reescribe el documento si su consulta no responde.
+            intentosDocumento: 3,
         },
 
         alarma: {
@@ -373,6 +398,12 @@
 
     // La Sheet es la fuente de verdad de scheduled/date/hour.
     // localStorage solo cachea la última sincronización (y respaldo si falla la red).
+    function agendadoReciente(c) {
+        if (!c || !c.scheduled || !c.cita || !c.cita.agendadoEn) return false;
+        const edad = Date.now() - Date.parse(c.cita.agendadoEn);
+        return edad >= 0 && edad < CONFIG.sheet.proteccionAgendadoMs;
+    }
+
     function fusionarClientes(base, { sheetManda = false } = {}) {
         const guardados = leerClientesGuardados();
         const porCedula = new Map(guardados.map((c) => [String(c.cedula), c]));
@@ -382,7 +413,12 @@
             .filter((c) => c && c.cedula != null && c.ciudadTramite)
             .map((c) => {
                 const previo = porCedula.get(String(c.cedula));
-                if (sheetManda) return c;
+                if (sheetManda) {
+                    if (!c.scheduled && agendadoReciente(previo)) {
+                        return { ...c, scheduled: true, cita: previo.cita, name: previo.name, email: previo.email };
+                    }
+                    return c;
+                }
                 // Respaldo local / CLIENTES_INICIALES: conservar scheduled local.
                 const entrada = {
                     ...c,
@@ -468,9 +504,30 @@
         });
     }
 
+    const claveSync = () => `ssSheetSyncAt:${nombreHoja()}`;
+    let refrescoEnCurso = false;
+
+    function refrescarSheetEnFondo() {
+        if (refrescoEnCurso) return;
+        refrescoEnCurso = true;
+        pedirClientesSheet()
+            .then((remotos) => {
+                if (!remotos.length) return;
+                fusionarClientes(remotos, { sheetManda: true });
+                localStorage.setItem(claveSync(), String(Date.now()));
+                log(`Sheet refrescada en segundo plano (${remotos.filter((c) => !c.scheduled).length} pendiente(s))`);
+            })
+            .catch((e) => log(`refresco de la Sheet falló: ${e.message}`))
+            .finally(() => {
+                refrescoEnCurso = false;
+            });
+    }
+
     // Al inicio de cada ciclo. Si la Sheet falla, se usa la última caché local
     // (nunca CLIENTES_INICIALES vacío: eso hacía creer que "todos están agendados").
     // confiable=true solo cuando la Sheet respondió bien: solo entonces FinCola.
+    // Con pendientes en la caché no se espera a la Sheet: se usa la caché y, si
+    // está vieja, se refresca en segundo plano para el ciclo siguiente.
     async function sincronizarClientes() {
         const cache = leerClientesGuardados();
         const { activo } = CONFIG.sheet;
@@ -490,6 +547,12 @@
             throw new Error('elige la ciudad en el dropdown del panel');
         }
 
+        const edad = Date.now() - Number(localStorage.getItem(claveSync()) || 0);
+        if (cache.some((c) => !c.scheduled) && edad < CONFIG.sheet.edadMaximaCacheSegundos * 1000) {
+            if (edad >= CONFIG.sheet.refrescoSegundos * 1000) refrescarSheetEnFondo();
+            return { clientes: cache, confiable: false };
+        }
+
         try {
             const remotos = await pedirClientesSheet();
             if (!remotos.length) {
@@ -501,6 +564,7 @@
             }
             const pendientes = remotos.filter((c) => !c.scheduled).length;
             log(`Hoja "${hoja}": ${remotos.length} cliente(s), ${pendientes} pendiente(s)`);
+            localStorage.setItem(claveSync(), String(Date.now()));
             return {
                 clientes: fusionarClientes(remotos, { sheetManda: true }),
                 confiable: true,
@@ -1093,12 +1157,168 @@
             if (token && token.value) {
                 pararAlarma();
                 log('captcha resuelto, continuando');
+                vigilarCaptcha();
                 return true;
             }
             await dormir(500);
         }
         pararAlarma();
         throw new Error('el captcha no se resolvió a tiempo');
+    }
+
+    // ───────────────────────────── FASE FINAL ─────────────────────────────────
+
+    const SEL_AGENDAR = 'div[tipo="Control"][pantalla="PasoCuatro"][nombre="btnAgendarCita"]';
+
+    function primeroVisible(sels) {
+        const lista = (Array.isArray(sels) ? sels : String(sels).split(','))
+            .map((s) => s.trim())
+            .filter(Boolean);
+        for (const sel of lista) {
+            const el = buscar(sel) || Array.from(document.querySelectorAll(sel)).find(visibleEnPantalla);
+            if (el) return el;
+        }
+        return null;
+    }
+
+    function tokenCaptcha() {
+        const token = document.querySelector(CONFIG.captcha.selToken);
+        return !!(token && token.value);
+    }
+
+    // Texto de un ModalError que no sea el de máximo de citas (ese tiene su manejo).
+    function modalErrorInesperado() {
+        if (!pantallaOverlayVisible('ModalError') || hayModalMaxCitasDia()) return '';
+        const modal = document.querySelector('div[nombrepantalla="ModalError"]');
+        return ((modal && modal.innerText) || 'aviso de error').replace(/\s+/g, ' ').trim();
+    }
+
+    // Suena la alarma y espera a que la persona destrabe la página (listo() true).
+    async function pedirAyuda(motivo, listo) {
+        const { esperaPersonaMs } = CONFIG.faseFinal;
+        pararAlarma();
+        alarma(motivo);
+        pintar(`${motivo}. Resuélvelo en la página; el script sigue solo.`, true);
+        log(`pidiendo ayuda: ${motivo}`);
+        const limite = Date.now() + esperaPersonaMs;
+        while (Date.now() < limite) {
+            if (listo()) {
+                pararAlarma();
+                log('   destrabado, continuando');
+                return true;
+            }
+            await dormir(500);
+        }
+        pararAlarma();
+        throw new Error(`${motivo} (sin respuesta en ${Math.round(esperaPersonaMs / 60000)} min)`);
+    }
+
+    let detenerVigiaCaptcha = () => {};
+
+    // reCAPTCHA invalida el token a los ~2 min y vacía el textarea. Mientras se
+    // completa el PasoTres se avisa en cuanto pasa; al llegar al PasoCuatro el
+    // token ya se envió y la vigilancia se apaga.
+    function vigilarCaptcha() {
+        detenerVigiaCaptcha();
+        const selPasoTres = [
+            'div[tipo="Control"][pantalla="PasoTres"][nombre="btnSiguiente"]',
+            'div[tipo="Control"][pantalla="PasoTres"][nombre="btnSiguienteBlock"]',
+            '#divPasoTresNumeroDocumento input',
+        ];
+        let vacios = 0;
+        let avisando = false;
+        const apagar = () => {
+            clearInterval(id);
+            if (avisando) pararAlarma();
+            detenerVigiaCaptcha = () => {};
+        };
+        const id = setInterval(() => {
+            if (primeroVisible(SEL_AGENDAR)) {
+                apagar();
+                return;
+            }
+            if (tokenCaptcha()) {
+                vacios = 0;
+                if (avisando) {
+                    avisando = false;
+                    pararAlarma();
+                    log('captcha marcado de nuevo');
+                }
+                return;
+            }
+            // Dos lecturas seguidas y fuera de cargas: evita falsas alarmas
+            // mientras la página procesa el envío.
+            if (estaCargando() || !primeroVisible(selPasoTres)) return;
+            vacios++;
+            if (vacios >= 2 && !avisando) {
+                avisando = true;
+                pararAlarma();
+                alarma('El captcha caducó: márcalo de nuevo');
+                pintar('El captcha caducó: márcalo de nuevo y el script sigue solo.', true);
+                log('captcha caducado');
+            }
+        }, 1000);
+        detenerVigiaCaptcha = apagar;
+    }
+
+    async function asegurarCaptchaVigente() {
+        if (tokenCaptcha() || !captchaUiPresente()) return;
+        await pedirAyuda('El captcha caducó: márcalo de nuevo', tokenCaptcha);
+    }
+
+    // Clic que debe llevar a la pantalla siguiente (paso.esperaHasta). Si no
+    // avanza, se repite el clic; si tras timeoutMs sigue igual, se pide ayuda.
+    async function clicHastaAvanzar(paso) {
+        const { reintentoMs, timeoutMs } = CONFIG.faseFinal;
+        const desc = paso.desc || paso.sel;
+        const avanzo = () => !!primeroVisible(paso.esperaHasta);
+        const limite = Date.now() + timeoutMs;
+        let clics = 0;
+        while (Date.now() < limite && !avanzo()) {
+            const aviso = modalErrorInesperado();
+            if (aviso) {
+                await pedirAyuda(`Aviso en ${desc}: ${aviso}`, avanzo);
+                break;
+            }
+            if (estaCargando()) {
+                await dormir(200);
+                continue;
+            }
+            const el = primeroVisible(paso.sel);
+            if (!el) {
+                await dormir(200);
+                continue;
+            }
+            if (paso.requiereCaptcha) await asegurarCaptchaVigente();
+            clics++;
+            if (clics > 1) log(`   ${desc} no avanzó; clic ${clics}`);
+            el.scrollIntoView({ block: 'center' });
+            clicar(resolverObjetivo(el));
+            let limiteClic = Date.now() + reintentoMs;
+            while (Date.now() < Math.min(limiteClic, limite) && !avanzo() && !modalErrorInesperado()) {
+                if (estaCargando()) limiteClic = Math.max(limiteClic, Date.now() + 1000);
+                await dormir(200);
+            }
+        }
+        if (!avanzo()) await pedirAyuda(`${desc} no avanza`, avanzo);
+        await dormir(paso.espera ?? CONFIG.esperaTrasClicMs ?? 200);
+    }
+
+    async function ejecutarPasoFinal(paso) {
+        if (paso.accion === 'documento') {
+            await escribirDocumento();
+            await dormir(paso.espera ?? CONFIG.esperaTrasClicMs ?? 200);
+            return true;
+        }
+        if (paso.accion === 'agendarCita') return agendarCitaYConfirmar();
+        if (paso.sel && !paso.marcar && paso.esperaHasta) return clicHastaAvanzar(paso);
+        try {
+            return await ejecutarPaso(paso);
+        } catch (e) {
+            if (esSinCupo(e) || esClienteYaAgendado(e)) throw e;
+            await pedirAyuda(`${paso.desc || paso.sel}: ${e.message}`, () => !!primeroVisible(paso.sel));
+            return ejecutarPaso(paso);
+        }
     }
 
     // La lista de trámites cambia en cada ciclo. Se recorre la cola y se queda con
@@ -1164,34 +1384,41 @@
         throw new SinCupo('ningún cliente pendiente coincide con los trámites disponibles');
     }
 
+    // La consulta del documento se dispara al salir del campo. Si la página está
+    // lenta y no responde, se vuelve a escribir y a salir del campo; si tampoco,
+    // se pide ayuda en vez de abortar (ya pasó el captcha).
     async function escribirDocumento() {
         if (!clienteActual) throw new Error('No hay un cliente seleccionado para el documento');
 
-        const campo = await esperarElemento(
-            '#divPasoTresNumeroDocumento input',
-            null,
-            CONFIG.timeoutElementoMs,
-        );
-        if (!campo) throw new Error('No apareció el número de documento');
+        const { intentosDocumento, reintentoMs } = CONFIG.faseFinal;
+        const selRespuesta = [
+            'div[nombrecontrol="DatosCorretos"] input[type="radio"][value="1"]',
+            'div[nombrecontrol="TerminosCondiciones"] input[type="checkbox"]',
+        ];
+        const respondio = () => !!primeroVisible(selRespuesta);
 
-        campo.scrollIntoView({ block: 'center' });
-        campo.focus();
-        campo.value = String(clienteActual.cedula);
-        disparar(campo, ['input', 'change', 'keyup']);
-        // La consulta del documento se dispara al salir del campo.
-        campo.blur();
-        clicar(document.body);
-        log(`   documento ${clienteActual.cedula}`);
-        // No dormir 4 s fijos: esperar a que salga Sí / términos tras la consulta.
-        await esperarSinCarga((CONFIG.cargando && CONFIG.cargando.timeoutMs) || 15000);
-        const postDoc = await esperarCualquiera(
-            [
-                'div[nombrecontrol="DatosCorretos"] input[type="radio"][value="1"]',
-                'div[nombrecontrol="TerminosCondiciones"] input[type="checkbox"]',
-            ],
-            CONFIG.timeoutElementoMs,
-        );
-        if (!postDoc) throw new Error('No aparecieron los controles tras el documento');
+        for (let intento = 1; intento <= intentosDocumento; intento++) {
+            const campo = await esperarElemento(
+                '#divPasoTresNumeroDocumento input',
+                null,
+                CONFIG.timeoutElementoMs,
+            );
+            if (!campo) break;
+            if (intento > 1) log(`   la consulta del documento no respondió; intento ${intento}`);
+
+            campo.scrollIntoView({ block: 'center' });
+            campo.focus();
+            campo.value = '';
+            campo.value = String(clienteActual.cedula);
+            disparar(campo, ['input', 'change', 'keyup']);
+            campo.blur();
+            clicar(document.body);
+            log(`   documento ${clienteActual.cedula}`);
+
+            await esperarSinCarga();
+            if (await esperarCualquiera(selRespuesta, reintentoMs * 2)) return;
+        }
+        if (!respondio()) await pedirAyuda('La consulta del documento no responde', respondio);
     }
 
     // Al elegir el trámite la página puede responder con el modal de que no hay
@@ -1324,13 +1551,15 @@
 
     // Tras Agendar: éxito (ModalInfoCita) o tope diario (ModalError) si ya tenía cita.
     async function agendarCitaYConfirmar() {
-        const selAgendar =
-            'div[tipo="Control"][pantalla="PasoCuatro"][nombre="btnAgendarCita"]';
         const selOk =
             'div[tipo="Control"][pantalla="ModalInfoCita"][nombre="btnAceptar"]';
 
-        const boton = await esperarElemento(selAgendar, null, CONFIG.timeoutElementoMs);
-        if (!boton) throw new Error('No apareció Agendar cita');
+        detenerVigiaCaptcha();
+        let boton = await esperarElemento(SEL_AGENDAR, null, CONFIG.timeoutElementoMs);
+        if (!boton) {
+            await pedirAyuda('No apareció Agendar cita', () => !!primeroVisible(SEL_AGENDAR));
+            boton = primeroVisible(SEL_AGENDAR);
+        }
 
         datosPersonaActual = leerDatosPersona();
         log(`   datos: ${datosPersonaActual.nombre || '?'} / ${datosPersonaActual.correo || '?'}`);
@@ -1339,9 +1568,14 @@
         clicar(resolverObjetivo(boton));
         log('   clic en Agendar cita');
 
+        // No se repite el clic en Agendar: un segundo envío podría volver como
+        // "máximo de citas" y registrarse mal. Si no responde, se avisa y se sigue
+        // atento: si la persona confirma la cita a mano, igual se registra.
         const limite = Date.now() + CONFIG.timeoutElementoMs;
-        while (Date.now() < limite) {
+        let limiteAyuda = 0;
+        for (;;) {
             if (hayModalMaxCitasDia()) {
+                if (limiteAyuda) pararAlarma();
                 log('   ModalError: máximo de citas por día');
                 await marcarAgendado({
                     sinFechaHora: true,
@@ -1353,8 +1587,9 @@
                 );
             }
 
-            const ok = buscar(selOk) || Array.from(document.querySelectorAll(selOk)).find(visibleEnPantalla);
+            const ok = primeroVisible(selOk);
             if (ok) {
+                if (limiteAyuda) pararAlarma();
                 await marcarAgendado();
                 clicar(resolverObjetivo(ok));
                 log('   cita confirmada (ModalInfoCita)');
@@ -1363,8 +1598,23 @@
                 return true;
             }
 
+            if (!limiteAyuda) {
+                const aviso = modalErrorInesperado();
+                if (aviso || Date.now() >= limite) {
+                    limiteAyuda = Date.now() + CONFIG.faseFinal.esperaPersonaMs;
+                    const motivo = aviso ? `Aviso al agendar: ${aviso}` : 'Agendar cita no respondió';
+                    pararAlarma();
+                    alarma(motivo);
+                    pintar(`${motivo}. Revisa la página; si confirmas la cita, el script la registra.`, true);
+                    log(`pidiendo ayuda: ${motivo}`);
+                }
+            } else if (Date.now() >= limiteAyuda) {
+                break;
+            }
+
             await dormir(150);
         }
+        pararAlarma();
         throw new Error('No apareció confirmación ni aviso de máximo de citas');
     }
 
@@ -1579,9 +1829,14 @@
                 throw new Error('sin pendientes en caché (la Sheet no confirmó el estado)');
             }
 
+            // Tras el captcha la cita ya está a la vista: esos pasos insisten y
+            // piden ayuda en vez de abortar el ciclo.
+            let enFaseFinal = false;
             for (const paso of pasos) {
                 log(`→ ${paso.desc || paso.sel}`);
-                await ejecutarPaso(paso);
+                if (enFaseFinal) await ejecutarPasoFinal(paso);
+                else await ejecutarPaso(paso);
+                if (paso.accion === 'captcha') enFaseFinal = true;
             }
             resultado = 'cita agendada, revisa el navegador y el correo';
             exito = true;
@@ -1635,6 +1890,8 @@
             resultado = fueSinCupo ? `sin cupo (${e.message})` : `falló: ${e.message}`;
             if (!fueSinCupo) softSeguidos = 0;
             log(`fin ciclo: ${resultado}${fueSinCupo ? ' [SinCupo→soft]' : ' [error→recarga]'}`);
+        } finally {
+            detenerVigiaCaptcha();
         }
 
         // El paso del captcha detiene el monitor en cuanto confirma que hay cita,
@@ -1812,6 +2069,7 @@
             } else {
                 if (window.Notification && Notification.permission === 'default') await Notification.requestPermission();
                 softSeguidos = 0;
+                localStorage.removeItem(claveSync());
                 guardarEstado({ activo: true, ciclos: 0, proximo: 0, reintentoSoft: false });
                 pintar('Iniciando...');
                 ejecutarCiclo();

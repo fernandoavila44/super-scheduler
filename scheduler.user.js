@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Super Scheduler (sandbox)
 // @namespace    super-scheduler
-// @version      1.25-sandbox
+// @version      1.26-sandbox
 // @description  [SANDBOX] Appointment scheduling monitor
 // @match        https://agendamiento.dian.gov.co/*
 // @run-at       document-idle
@@ -1243,8 +1243,11 @@
         while (Date.now() < limite && !avanzo()) {
             const aviso = modalErrorInesperado();
             if (aviso) {
-                await pedirAyuda(`Aviso en ${desc}: ${aviso}`, avanzo);
-                break;
+                log(`   ModalError en ${desc}: ${aviso}`);
+                await cerrarModalError();
+                guardarEstado({ activo: true });
+                refrescarBoton();
+                throw new SinCupo(`en ${desc}: ${aviso}`);
             }
             if (estaCargando()) {
                 await dormir(200);
@@ -1563,11 +1566,22 @@
                 return true;
             }
 
+            // Otro aviso (p. ej. la agenda ya no está disponible): se cierra y el
+            // cliente sigue pendiente para el próximo reintento, sin alarma.
+            const aviso = modalErrorInesperado();
+            if (aviso) {
+                if (limiteAyuda) pararAlarma();
+                log(`   ModalError al agendar: ${aviso}`);
+                await cerrarModalError();
+                guardarEstado({ activo: true });
+                refrescarBoton();
+                throw new SinCupo(`al agendar: ${aviso}`);
+            }
+
             if (!limiteAyuda) {
-                const aviso = modalErrorInesperado();
-                if (aviso || Date.now() >= limite) {
+                if (Date.now() >= limite) {
                     limiteAyuda = Date.now() + CONFIG.faseFinal.esperaPersonaMs;
-                    const motivo = aviso ? `Aviso al agendar: ${aviso}` : 'Agendar cita no respondió';
+                    const motivo = 'Agendar cita no respondió';
                     pararAlarma();
                     alarma(motivo);
                     pintar(`${motivo}. Revisa la página; si confirmas la cita, el script la registra.`, true);

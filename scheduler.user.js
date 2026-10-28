@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Super Scheduler (sandbox)
 // @namespace    super-scheduler
-// @version      1.28-sandbox
+// @version      1.29-sandbox
 // @description  [SANDBOX] Appointment scheduling monitor
 // @match        https://agendamiento.dian.gov.co/*
 // @run-at       document-idle
@@ -163,7 +163,7 @@
                 // el paso del captcha (alarma / título CUPOS / AHK) hasta 45 s o más.
                 espera: 300,
             },
-            // Aquí el monitor se detiene, avisa y espera a que resuelvas el captcha.
+            // La alarma y CUPOS ya salieron al elegir fecha y hora.
             { accion: 'captcha', desc: 'Captcha (manual)' },
             // El campo del documento solo se muestra con el captcha resuelto, y la
             // consulta se dispara al salir del campo. La sincronía es esperaHasta.
@@ -1132,6 +1132,10 @@
             if (resultado.opcion || resultado.texto) {
                 const valorHora = resultado.opcion ? ` (value="${resultado.opcion.value}")` : '';
                 log(`   hora elegida: ${resultado.texto}${valorHora}`);
+                // Hay cupo de verdad: el operario se prepara y el AHK ya busca
+                // la casilla mientras carga el captcha.
+                detener('¡CUPOS! Hay fecha y hora. Prepárate para el captcha.');
+                log('fecha y hora → alarma y título CUPOS');
                 return true;
             }
 
@@ -1167,20 +1171,16 @@
 
     // El reCAPTCHA vive en un iframe de google.com: el script no puede marcarlo
     // (es otro origen) y Google rechaza los clics sintéticos incluso si pudiera.
-    // Lo resuelve la persona. Llegar hasta aquí ya significa que hay fecha y hora
-    // libres, así que es el momento exacto de avisar y dejar de recargar.
+    // Lo resuelve la persona. La alarma y CUPOS ya están activos desde la hora.
     async function esperarCaptcha() {
         const { selToken, timeoutMs } = CONFIG.captcha;
 
-        // Primero que pinte el PasoTres / widget; luego alarma al instante.
         const limiteUi = Date.now() + CONFIG.timeoutElementoMs;
         while (Date.now() < limiteUi && !captchaUiPresente()) {
             await dormir(150);
         }
         if (!captchaUiPresente()) throw new Error('No apareció el captcha');
-
-        detener('¡CUPOS! Marca el captcha y el script sigue solo.');
-        log('captcha en pantalla → alarma y título CUPOS');
+        log('captcha en pantalla, esperando que lo marquen');
 
         const limite = Date.now() + timeoutMs;
         let tarde = false;
@@ -1788,6 +1788,7 @@
 
     function recargarInicio(motivo) {
         softSeguidos = 0;
+        pararAlarma();
         log(motivo || 'recarga a inicio');
         guardarEstado({ ejecutando: false, reintentoSoft: false, proximo: Date.now() });
         location.href = CONFIG.urlInicio;
@@ -1852,6 +1853,7 @@
             if (seguirConSiguienteCliente(estado, resultado)) return;
             resultado = 'cita agendada. No quedan clientes pendientes';
         } catch (e) {
+            pararAlarma();
             if (esBloqueoSeguridad(e)) return;
             if (esFinCola(e)) {
                 softSeguidos = 0;
@@ -1877,11 +1879,18 @@
             log(`fin ciclo: ${resultado}${fueSinCupo ? ' [SinCupo→soft]' : ' [error→recarga]'}`);
         }
 
-        // El paso del captcha detiene el monitor en cuanto confirma que hay cita,
-        // así que desde ahí no se recarga más: hacerlo borraría el formulario.
+        // detener() apagó el monitor al haber fecha y hora, para no recargar el
+        // formulario. Si el ciclo falló después, el cupo ya no sirve: se enciende
+        // de nuevo y se reintenta. Si fue bien, se deja apagado (o lo reenciende
+        // seguirConSiguienteCliente).
         if (!leerEstado().activo) {
-            pintar(`Ciclo ${estado.ciclos}: ${resultado}`, exito);
-            return;
+            if (!exito) {
+                guardarEstado({ activo: true, ejecutando: false });
+                refrescarBoton();
+            } else {
+                pintar(`Ciclo ${estado.ciclos}: ${resultado}`, exito);
+                return;
+            }
         }
 
         const maxSoft = (CONFIG.reintento && CONFIG.reintento.softMaxSeguidos) || 8;

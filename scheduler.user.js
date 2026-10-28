@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Super Scheduler
 // @namespace    super-scheduler
-// @version      1.27
+// @version      1.28
 // @description  Appointment scheduling monitor
 // @match        https://agendamiento.dian.gov.co/*
 // @run-at       document-idle
@@ -50,7 +50,7 @@
             // Nombre exacto de la pestaña; vacío = se elige en el dropdown del panel.
             hoja: '',
             // Opciones del dropdown (deben coincidir con los nombres de las pestañas).
-            ciudades: ['Bogota', 'Medellin', 'Cali'],
+            ciudades: ['Bogota', 'Medellin', 'Cali', 'Bucaramanga'],
             timeoutMs: 15000,
             // La lista guardada se usa sin consultar la Sheet si tiene menos de
             // esto; si es más vieja, se refresca en segundo plano sin frenar el ciclo.
@@ -272,6 +272,9 @@
             'El usuario excedió el número máximo de citas por día para el mismo servicio',
             'El usuario excedió el número máximo de citas solicitadas abiertas',
         ],
+
+        // El player bloquea la petición: Aceptar deja la página trabada, recargar.
+        textoBloqueoSeguridad: 'solicitud bloqueada por controles de seguridad',
 
         sinEspecialidades: {
             // El aviso sale en la pantalla ModalError, que es genérica; el botón se
@@ -711,6 +714,15 @@
     const esClienteYaAgendado = (e) =>
         !!(e && (e instanceof ClienteYaAgendado || e.name === 'ClienteYaAgendado'));
 
+    class BloqueoSeguridad extends Error {
+        constructor(mensaje) {
+            super(mensaje);
+            this.name = 'BloqueoSeguridad';
+        }
+    }
+    const esBloqueoSeguridad = (e) =>
+        !!(e && (e instanceof BloqueoSeguridad || e.name === 'BloqueoSeguridad'));
+
     const dormir = (ms) => new Promise((r) => setTimeout(r, ms));
 
     const visible = (el) => !!(el && el.offsetParent !== null);
@@ -799,6 +811,19 @@
         return (CONFIG.textosClienteConCita || []).find((t) => texto.includes(normalizar(t))) || '';
     }
 
+    function hayModalBloqueoSeguridad() {
+        const aviso = normalizar(CONFIG.textoBloqueoSeguridad || '');
+        if (!aviso) return false;
+        return textoModalErrorVisible().includes(aviso);
+    }
+
+    // No se pulsa Aceptar: deja el player trabado. Recarga y el arranque sigue.
+    function recargarSiBloqueoSeguridad() {
+        if (!hayModalBloqueoSeguridad()) return;
+        recargarInicio('solicitud bloqueada por controles de seguridad');
+        throw new BloqueoSeguridad('solicitud bloqueada por controles de seguridad');
+    }
+
     async function cerrarModalError() {
         const sel =
             (CONFIG.sinEspecialidades && CONFIG.sinEspecialidades.selAceptar) ||
@@ -823,6 +848,7 @@
         const porDefecto = (CONFIG.cargando && CONFIG.cargando.timeoutMs) || 15000;
         const limite = Date.now() + (timeout ?? porDefecto);
         while (Date.now() < limite) {
+            recargarSiBloqueoSeguridad();
             if (lanzarSinCupo && hayModalSinCupo()) await cerrarAvisoSinCupo();
             if (!estaCargando()) {
                 await dormir(50);
@@ -842,6 +868,7 @@
                   .filter(Boolean);
         const limite = Date.now() + timeout;
         while (Date.now() < limite) {
+            recargarSiBloqueoSeguridad();
             if (hayModalSinCupo()) await cerrarAvisoSinCupo();
             for (const sel of lista) {
                 const el = buscar(sel) || Array.from(document.querySelectorAll(sel)).find(visibleEnPantalla);
@@ -853,6 +880,7 @@
     }
 
     async function estabilizarTrasPaso(paso) {
+        recargarSiBloqueoSeguridad();
         if (hayModalSinCupo()) await cerrarAvisoSinCupo();
         await esperarSinCarga((CONFIG.cargando && CONFIG.cargando.timeoutMs) || 15000);
         if (paso.esperaHasta) {
@@ -881,6 +909,7 @@
         }
         const limite = Date.now() + timeout;
         while (Date.now() < limite) {
+            recargarSiBloqueoSeguridad();
             const el = buscar(sel, contiene);
             if (el) return el;
             await dormir(150);
@@ -1230,6 +1259,7 @@
         const limite = Date.now() + timeoutMs;
         let clics = 0;
         while (Date.now() < limite && !avanzo()) {
+            recargarSiBloqueoSeguridad();
             const aviso = modalErrorInesperado();
             if (aviso) {
                 log(`   ModalError en ${desc}: ${aviso}`);
@@ -1390,6 +1420,7 @@
             const select = document.querySelector(selSvc);
             if (select && Array.from(select.options).some((o) => o.value !== '')) return true;
 
+            recargarSiBloqueoSeguridad();
             if (hayModalSinCupo()) await cerrarAvisoSinCupo();
             await dormir(150);
         }
@@ -1526,6 +1557,7 @@
         const limite = Date.now() + CONFIG.timeoutElementoMs;
         let limiteAyuda = 0;
         for (;;) {
+            recargarSiBloqueoSeguridad();
             const yaTieneCita = hayModalMaxCitasDia();
             if (yaTieneCita) {
                 pararAlarma();
@@ -1820,6 +1852,7 @@
             if (seguirConSiguienteCliente(estado, resultado)) return;
             resultado = 'cita agendada. No quedan clientes pendientes';
         } catch (e) {
+            if (esBloqueoSeguridad(e)) return;
             if (esFinCola(e)) {
                 softSeguidos = 0;
                 guardarEstado({ activo: false, ejecutando: false, ultimo: e.message });

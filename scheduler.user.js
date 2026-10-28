@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Super Scheduler
 // @namespace    super-scheduler
-// @version      1.29
+// @version      1.30
 // @description  Appointment scheduling monitor
 // @match        https://agendamiento.dian.gov.co/*
 // @run-at       document-idle
@@ -1132,10 +1132,9 @@
             if (resultado.opcion || resultado.texto) {
                 const valorHora = resultado.opcion ? ` (value="${resultado.opcion.value}")` : '';
                 log(`   hora elegida: ${resultado.texto}${valorHora}`);
-                // Hay cupo de verdad: el operario se prepara y el AHK ya busca
-                // la casilla mientras carga el captcha.
-                detener('¡CUPOS! Hay fecha y hora. Prepárate para el captcha.');
-                log('fecha y hora → alarma y título CUPOS');
+                // Título CUPOS ahora: el AHK busca la casilla mientras carga el captcha.
+                detener('¡CUPOS! Hay fecha y hora.', { sonido: false });
+                log('fecha y hora → título CUPOS');
                 return true;
             }
 
@@ -1171,7 +1170,7 @@
 
     // El reCAPTCHA vive en un iframe de google.com: el script no puede marcarlo
     // (es otro origen) y Google rechaza los clics sintéticos incluso si pudiera.
-    // Lo resuelve la persona. La alarma y CUPOS ya están activos desde la hora.
+    // Lo resuelve la persona. El sonido viene del trámite; CUPOS, de la hora.
     async function esperarCaptcha() {
         const { selToken, timeoutMs } = CONFIG.captcha;
 
@@ -1364,6 +1363,10 @@
             clienteActual = cliente;
             datosPersonaActual = { nombre: '', correo: '' };
             log(`   cliente ${cliente.cedula}: ${hallado.opcion.textContent.trim()}`);
+            // Sonido ya: el operario se prepara. El título CUPOS espera a fecha
+            // y hora para que el AHK no busque la casilla todavía.
+            alarma('Trámite coincidente. Prepárate para el captcha.', { titulo: false });
+            log('trámite coincidente → alarma sonora');
             return true;
         }
 
@@ -1632,30 +1635,46 @@
         return normalizar(document.body.innerText).includes(aviso);
     };
 
-    function detener(mensaje) {
+    function detener(mensaje, opts = {}) {
         guardarEstado({ activo: false, ejecutando: false, ultimo: mensaje });
         pintar(mensaje, true);
         refrescarBoton();
-        alarma(mensaje);
+        alarma(mensaje, opts);
     }
 
-    // La alarma insiste hasta que alguien atienda, así que hay que poder pararla.
-    let pararAlarma = () => {};
+    // Sonido y título se pueden encender por separado (trámite vs fecha/hora).
+    let pararSonido = () => {};
+    let pararTitulo = () => {};
+    function pararAlarma() {
+        pararSonido();
+        pararTitulo();
+    }
 
-    function alarma(cuerpo) {
+    function alarma(cuerpo, opts = {}) {
+        const conSonido = opts.sonido !== false;
+        const conTitulo = opts.titulo !== false;
         const { bipsPorRafaga, segundosEntreRafagas, volumen } = CONFIG.alarma;
+
+        if (conTitulo) {
+            pararTitulo();
+            const original = document.title.includes('CUPOS') ? 'Agendamiento' : document.title;
+            document.title = '*** CUPOS ***';
+            let on = true;
+            const idTitulo = setInterval(() => {
+                document.title = (on = !on) ? '*** CUPOS ***' : original;
+            }, 800);
+            pararTitulo = () => {
+                clearInterval(idTitulo);
+                document.title = original;
+                pararTitulo = () => {};
+            };
+        }
+
+        if (!conSonido) return;
+
+        pararSonido();
         const temporizadores = [];
         let ctx = null;
-
-        // Título al instante: AHK busca "CUPOS" en la ventana (no esperar el interval).
-        const original = document.title.includes('CUPOS') ? 'Agendamiento' : document.title;
-        document.title = '*** CUPOS ***';
-        let on = true;
-        temporizadores.push(
-            setInterval(() => {
-                document.title = (on = !on) ? '*** CUPOS ***' : original;
-            }, 800),
-        );
 
         try {
             const AC = vistaPagina().AudioContext || vistaPagina().webkitAudioContext;
@@ -1668,7 +1687,6 @@
                     'audio bloqueado por la política de autoplay del navegador; ' +
                         'quedan la notificación y el título CUPOS',
                 );
-                // Reintentar resume unas veces (a veces se libera solo).
                 let intentos = 0;
                 const idResume = setInterval(() => {
                     intentos += 1;
@@ -1687,8 +1705,6 @@
                     const gan = ctx.createGain();
                     osc.type = 'square';
                     osc.frequency.value = i % 2 ? 880 : 1245;
-                    // Rampas cortas en vez de un valor fijo: a este volumen, cortar
-                    // la onda en seco mete un chasquido en cada bip.
                     gan.gain.setValueAtTime(0, t);
                     gan.gain.linearRampToValueAtTime(volumen, t + 0.01);
                     gan.gain.setValueAtTime(volumen, t + 0.3);
@@ -1710,11 +1726,10 @@
             new Notification('Cupo disponible', { body: cuerpo });
         }
 
-        pararAlarma = () => {
+        pararSonido = () => {
             temporizadores.forEach(clearInterval);
-            document.title = original;
             if (ctx) ctx.close().catch(() => {});
-            pararAlarma = () => {};
+            pararSonido = () => {};
         };
     }
 

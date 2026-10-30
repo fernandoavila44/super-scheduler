@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Super Scheduler (sandbox)
 // @namespace    super-scheduler
-// @version      1.30-sandbox
+// @version      1.31-sandbox
 // @description  [SANDBOX] Appointment scheduling monitor
 // @match        https://agendamiento.dian.gov.co/*
 // @run-at       document-idle
@@ -218,18 +218,21 @@
             selHoras: 'div[nombrecontrol="Horas"] select.customSelect',
             // Solo se muestra habilitado cuando el player aceptó la hora.
             selSiguiente: 'div[tipo="Control"][pantalla="PasoDos"][nombre="btnSiguiente"]',
+            // Tope del paso entero: la página lenta puede tardar minutos en pintar
+            // días u horas; no se declara "sin cupo" antes de agotar esto.
+            timeoutPasoMs: 5 * 60 * 1000,
             // Cuánto esperar a que el calendario se despliegue tras el clic.
-            timeoutCalendarioMs: 15000,
+            timeoutCalendarioMs: 60000,
             // Cuánto esperar a que el calendario pinte días habilitados.
-            timeoutDiasMs: 10000,
+            timeoutDiasMs: 5 * 60 * 1000,
             // Cuánto esperar las horas de un día antes de descartarlo y probar el
             // siguiente. Margen alto: a veces el texto aparece antes que el value.
-            timeoutHorasMs: 20000,
+            timeoutHorasMs: 5 * 60 * 1000,
             // Tras elegir la hora, cuánto esperar la confirmación del player
             // (hora seleccionada o Siguiente habilitado) antes de reintentar.
-            confirmarHoraMs: 5000,
+            confirmarHoraMs: 15000,
             // Veces que se vuelve a aplicar la hora si el player rehízo el select.
-            intentosHora: 3,
+            intentosHora: 8,
         },
 
         captcha: {
@@ -1010,6 +1013,7 @@
             selDia,
             selHoras,
             selSiguiente,
+            timeoutPasoMs,
             timeoutCalendarioMs,
             timeoutDiasMs,
             timeoutHorasMs,
@@ -1017,55 +1021,115 @@
             intentosHora,
         } = CONFIG.fechaYHora;
 
-        async function abrirCalendario() {
-            // Un segundo clic con el calendario abierto lo cerraría, de ahí la
-            // comprobación previa.
-            if (buscar(selAbierto)) return;
-            const boton = await esperarElemento(selBoton, null, CONFIG.timeoutElementoMs);
-            if (!boton) {
-                // Sin especialidades el PasoDos nunca se muestra: es un "no hay
-                // cupo", no un fallo del script.
-                if (avisoSinCupo()) throw new SinCupo('la página avisó que no hay especialidades');
-                throw new Error('No apareció el botón de fecha');
-            }
-            await esperarSinCarga();
-            clicar(resolverObjetivo(boton));
-            if (!(await esperarElemento(selAbierto, null, timeoutCalendarioMs))) {
-                throw new Error('El calendario no se desplegó');
-            }
+        const limitePaso = Date.now() + (timeoutPasoMs || 5 * 60 * 1000);
+        const resto = () => Math.max(0, limitePaso - Date.now());
+        const restoO = (tope) => Math.max(1000, Math.min(tope, resto()));
+
+        function calendarioAbierto() {
+            const tabla = document.querySelector(selAbierto);
+            return !!(tabla && (visibleEnPantalla(tabla) || visible(tabla)));
         }
 
-        // El calendario puede pintarse antes de que lleguen los días con cupo.
-        async function esperarDiasHabilitados() {
-            const limite = Date.now() + timeoutDiasMs;
-            while (Date.now() < limite) {
-                const dias = Array.from(document.querySelectorAll(selDia))
-                    .filter(visible)
-                    .map((a) => a.getAttribute('data-value'))
-                    .filter(Boolean);
-                if (dias.length) return dias;
-                await dormir(250);
+        function selectHoras() {
+            const el = document.querySelector(selHoras);
+            if (el && (visibleEnPantalla(el) || visible(el))) return el;
+            return buscar(selHoras);
+        }
+
+        // No usar offsetParent: el popup del calendario a veces lo deja en null
+        // y el script juraba que no había días aunque se veían en pantalla.
+        function listarDiasHabilitados() {
+            const celdas = document.querySelectorAll(
+                'div[nombrecontrol="Calendario"] td.k-calendar-td:not(.k-other-month)',
+            );
+            const dias = [];
+            for (const td of celdas) {
+                if (td.classList.contains('k-disabled') || td.classList.contains('k-state-disabled')) continue;
+                if (td.getAttribute('aria-disabled') === 'true') continue;
+                const a = td.querySelector('a.k-link');
+                if (!a) continue;
+                if (!visibleEnPantalla(a) && !visibleEnPantalla(td) && !visible(a)) continue;
+                const valor = a.getAttribute('data-value');
+                if (valor) dias.push(valor);
             }
-            return [];
+            if (dias.length) return dias;
+            return Array.from(document.querySelectorAll(selDia))
+                .filter((a) => visibleEnPantalla(a) || visible(a))
+                .map((a) => a.getAttribute('data-value'))
+                .filter(Boolean);
+        }
+
+        async function abrirCalendario() {
+            if (calendarioAbierto() && listarDiasHabilitados().length) return true;
+            const boton =
+                buscar(selBoton) ||
+                Array.from(document.querySelectorAll(selBoton)).find(visibleEnPantalla) ||
+                (await esperarElemento(selBoton, null, restoO(CONFIG.timeoutElementoMs)));
+            if (!boton) {
+                if (avisoSinCupo()) throw new SinCupo('la página avisó que no hay especialidades');
+                if (resto() <= 0) throw new Error('No apareció el botón de fecha');
+                return false;
+            }
+            await esperarSinCarga(restoO((CONFIG.cargando && CONFIG.cargando.timeoutMs) || 15000));
+            if (!calendarioAbierto()) {
+                clicar(resolverObjetivo(boton));
+                const limite = Date.now() + restoO(timeoutCalendarioMs);
+                while (Date.now() < limite && !calendarioAbierto()) {
+                    if (estaCargando()) {
+                        await dormir(200);
+                        continue;
+                    }
+                    await dormir(200);
+                }
+            }
+            return calendarioAbierto();
+        }
+
+        async function esperarDiasHabilitados() {
+            const limite = Date.now() + restoO(timeoutDiasMs);
+            let aviso = 0;
+            while (Date.now() < limite) {
+                recargarSiBloqueoSeguridad();
+                if (estaCargando()) {
+                    await esperarSinCarga(restoO(30000));
+                    continue;
+                }
+                await abrirCalendario();
+                const dias = listarDiasHabilitados();
+                if (dias.length) return dias;
+                if (Date.now() - aviso > 15000) {
+                    aviso = Date.now();
+                    log(`   calendario visible, aún sin días habilitados (${Math.ceil(resto() / 1000)} s restantes)`);
+                }
+                await dormir(400);
+            }
+            return listarDiasHabilitados();
         }
 
         const horaSeleccionada = (select) => {
             const o = select && select.options[select.selectedIndex];
             return esOpcionHora(o) ? o : null;
         };
-        const siguienteListo = () => !!buscar(selSiguiente);
+        const siguienteListo = () => {
+            const el = document.querySelector(selSiguiente);
+            return !!(el && (visibleEnPantalla(el) || visible(el))) || !!buscar(selSiguiente);
+        };
 
         // Re-consulta el <select> en cada sondeo (el player puede recrearlo).
-        // La hora se aplica una vez y se espera la confirmación del player: al
-        // disparar change rehace el select, y volver a aplicarla cada 250 ms lo
-        // mantenía en ese ciclo hasta agotar el tiempo.
+        // No se aborta a las 3 aplicaciones: si las horas se ven, se insiste
+        // hasta el tope del paso.
         async function esperarYElegirHora() {
-            const limite = Date.now() + timeoutHorasMs;
+            const limite = Date.now() + restoO(timeoutHorasMs);
             let aplicaciones = 0;
             let ultimaTexto = '';
+            let aviso = 0;
             while (Date.now() < limite) {
-                await esperarSinCarga();
-                const select = buscar(selHoras);
+                recargarSiBloqueoSeguridad();
+                if (estaCargando()) {
+                    await esperarSinCarga(restoO(30000));
+                    continue;
+                }
+                const select = selectHoras();
                 const elegida = horaSeleccionada(select);
                 if (elegida && (aplicaciones > 0 || siguienteListo())) {
                     return { select, opcion: elegida, texto: elegida.textContent.trim() };
@@ -1076,32 +1140,38 @@
 
                 const opcion = select && Array.from(select.options).find(esOpcionHora);
                 if (!opcion) {
-                    await dormir(250);
+                    if (Date.now() - aviso > 15000) {
+                        aviso = Date.now();
+                        log(
+                            `   esperando horas (${Math.ceil((limite - Date.now()) / 1000)} s) ` +
+                                `[${resumenOpcionesHoras(select)}]`,
+                        );
+                    }
+                    await dormir(400);
                     continue;
                 }
-                if (aplicaciones >= intentosHora) break;
 
                 aplicaciones++;
                 ultimaTexto = opcion.textContent.trim();
-                log(`   aplicando hora ${ultimaTexto} (intento ${aplicaciones}/${intentosHora})`);
+                log(`   aplicando hora ${ultimaTexto} (intento ${aplicaciones})`);
                 select.focus();
                 aplicarOpcionSelect(select, opcion);
 
                 const limiteConfirmar = Math.min(limite, Date.now() + confirmarHoraMs);
                 while (Date.now() < limiteConfirmar) {
                     await dormir(200);
-                    const actual = buscar(selHoras);
+                    const actual = selectHoras();
                     const ok = horaSeleccionada(actual);
                     if (ok) return { select: actual, opcion: ok, texto: ok.textContent.trim() };
                     if (siguienteListo()) return { select: actual, opcion: null, texto: ultimaTexto };
                 }
-                const actual = buscar(selHoras);
+                const actual = selectHoras();
                 log(
                     `   la hora no se confirmó (index=${actual ? actual.selectedIndex : '-'}, ` +
                         `value="${actual ? actual.value : ''}")`,
                 );
             }
-            return { select: buscar(selHoras), opcion: null, aplicaciones };
+            return { select: selectHoras(), opcion: null, aplicaciones };
         }
 
         await abrirCalendario();
@@ -1115,9 +1185,12 @@
 
         let ultimoDetalle = '';
         for (const valor of dias) {
+            if (resto() <= 0) break;
             await abrirCalendario();
 
-            const dia = buscar(`${selDia}[data-value="${valor}"]`);
+            const dia =
+                document.querySelector(`${selDia}[data-value="${valor}"]`) ||
+                buscar(`${selDia}[data-value="${valor}"]`);
             if (!dia) {
                 log(`   el día ${valor} ya no está habilitado`);
                 continue;
@@ -1125,7 +1198,7 @@
 
             log(`   probando ${dia.title || valor}`);
             clicar(dia);
-            await esperarSinCarga();
+            await esperarSinCarga(restoO(30000));
             await dormir(CONFIG.esperaTrasClicMs ?? 200);
 
             const resultado = await esperarYElegirHora();

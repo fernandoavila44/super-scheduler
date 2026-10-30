@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Super Scheduler (sandbox)
 // @namespace    super-scheduler
-// @version      1.32-sandbox
+// @version      1.33-sandbox
 // @description  [SANDBOX] Appointment scheduling monitor
 // @match        https://agendamiento.dian.gov.co/*
 // @run-at       document-idle
@@ -984,16 +984,16 @@
 
     // Formato real DIAN: texto "2:00 PM" / value "10/15/2026 2:00:00 PM".
     function esOpcionHora(o) {
-        if (!o || o.disabled) return false;
+        if (!o) return false;
         const texto = (o.textContent || '').replace(/\s+/g, ' ').trim();
         const value = String(o.value || '').trim();
         if (!value && !texto) return false;
-        if (/\d{1,2}\s*:\s*\d{2}(\s*[AaPp]\.?\s*[Mm]\.?)?/.test(texto)) return true;
+        if (/seleccion|elija|elige|escoger/i.test(texto) && !/\d/.test(texto)) return false;
+        if (/^(0|-1|null|undefined)$/i.test(value) && !/\d/.test(texto)) return false;
+        if (/\d{1,2}\s*:\s*\d{2}/.test(texto) || /\d{1,2}\s*:\s*\d{2}/.test(value)) return true;
         if (/\d{1,2}\/\d{1,2}\/\d{2,4}\s+\d{1,2}:\d{2}/.test(value)) return true;
         if (!value) return false;
-        if (/^(0|-1|null|undefined)$/i.test(value)) return false;
-        if (/seleccion|elija|elige|hora/i.test(texto) && !/\d/.test(texto)) return false;
-        return true;
+        return !o.disabled;
     }
 
     function resumenOpcionesHoras(select) {
@@ -1034,9 +1034,12 @@
         }
 
         function selectHoras() {
-            const el = document.querySelector(selHoras);
-            if (el && (visibleEnPantalla(el) || visible(el))) return el;
-            return buscar(selHoras);
+            const caja = document.querySelector('div[nombrecontrol="Horas"]');
+            const el =
+                (caja && caja.querySelector('select.customSelect, select')) ||
+                document.querySelector(selHoras) ||
+                buscar(selHoras);
+            return el || null;
         }
 
         // No usar offsetParent: el popup del calendario a veces lo deja en null
@@ -1159,6 +1162,8 @@
             let aplicaciones = 0;
             let ultimaTexto = '';
             let aviso = 0;
+            let clics = 0;
+            let ultimoClic = 0;
             while (Date.now() < limite) {
                 recargarSiBloqueoSeguridad();
                 if (estaCargando()) {
@@ -1174,7 +1179,18 @@
                     return { select, opcion: elegida, texto: ultimaTexto };
                 }
 
-                const opcion = select && Array.from(select.options).find(esOpcionHora);
+                let opcion = select && Array.from(select.options).find(esOpcionHora);
+                // El customSelect a menudo nace vacío: las horas llegan al abrirlo.
+                if (select && !opcion && Date.now() - ultimoClic > 1500 && clics < 8) {
+                    select.scrollIntoView({ block: 'center' });
+                    select.focus();
+                    clicar(select);
+                    clics++;
+                    ultimoClic = Date.now();
+                    log(`   abriendo selector de horas (clic ${clics})`);
+                    await dormir(400);
+                    opcion = Array.from(selectHoras()?.options || []).find(esOpcionHora);
+                }
                 if (!opcion) {
                     if (Date.now() - aviso > 15000) {
                         aviso = Date.now();

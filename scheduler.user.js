@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Super Scheduler
 // @namespace    super-scheduler
-// @version      1.31
+// @version      1.32
 // @description  Appointment scheduling monitor
 // @match        https://agendamiento.dian.gov.co/*
 // @run-at       document-idle
@@ -210,11 +210,13 @@
             // El calendario vive siempre en el DOM; su tabla visible es la señal
             // de que está desplegado.
             selAbierto: 'div[nombrecontrol="Calendario"] table.k-calendar-table',
-            // Kendo marca con k-disabled los días sin cupo y con k-other-month los
-            // días de relleno del mes siguiente. Las citas solo salen en el mes en
-            // curso, así que se descartan ambos y nunca se cambia de mes.
+            // Kendo marca con k-disabled los días sin cupo. k-other-month son días
+            // del mes anterior/siguiente visibles en esta hoja (p. ej. noviembre
+            // al final de octubre): si están habilitados, sí se toman.
             selDia:
-                'div[nombrecontrol="Calendario"] td.k-calendar-td:not(.k-disabled):not(.k-other-month) a.k-link',
+                'div[nombrecontrol="Calendario"] td.k-calendar-td:not(.k-disabled):not(.k-state-disabled) a.k-link',
+            selMesSiguiente:
+                'div[nombrecontrol="Calendario"] .k-nav-next, div[nombrecontrol="Calendario"] .k-calendar-nav-next',
             selHoras: 'div[nombrecontrol="Horas"] select.customSelect',
             // Solo se muestra habilitado cuando el player aceptó la hora.
             selSiguiente: 'div[tipo="Control"][pantalla="PasoDos"][nombre="btnSiguiente"]',
@@ -1011,6 +1013,7 @@
             selBoton,
             selAbierto,
             selDia,
+            selMesSiguiente,
             selHoras,
             selSiguiente,
             timeoutPasoMs,
@@ -1038,10 +1041,16 @@
 
         // No usar offsetParent: el popup del calendario a veces lo deja en null
         // y el script juraba que no había días aunque se veían en pantalla.
+        function ordenFecha(valor) {
+            const n = Date.parse(String(valor).replace(/\./g, '/'));
+            return Number.isNaN(n) ? 0 : n;
+        }
+
         function listarDiasHabilitados() {
             const celdas = document.querySelectorAll(
-                'div[nombrecontrol="Calendario"] td.k-calendar-td:not(.k-other-month)',
+                'div[nombrecontrol="Calendario"] td.k-calendar-td',
             );
+            const vistos = new Set();
             const dias = [];
             for (const td of celdas) {
                 if (td.classList.contains('k-disabled') || td.classList.contains('k-state-disabled')) continue;
@@ -1050,13 +1059,32 @@
                 if (!a) continue;
                 if (!visibleEnPantalla(a) && !visibleEnPantalla(td) && !visible(a)) continue;
                 const valor = a.getAttribute('data-value');
-                if (valor) dias.push(valor);
+                if (!valor || vistos.has(valor)) continue;
+                vistos.add(valor);
+                dias.push(valor);
             }
-            if (dias.length) return dias;
-            return Array.from(document.querySelectorAll(selDia))
-                .filter((a) => visibleEnPantalla(a) || visible(a))
-                .map((a) => a.getAttribute('data-value'))
-                .filter(Boolean);
+            if (!dias.length) {
+                for (const a of document.querySelectorAll(selDia)) {
+                    if (!(visibleEnPantalla(a) || visible(a))) continue;
+                    const valor = a.getAttribute('data-value');
+                    if (!valor || vistos.has(valor)) continue;
+                    vistos.add(valor);
+                    dias.push(valor);
+                }
+            }
+            dias.sort((a, b) => ordenFecha(a) - ordenFecha(b));
+            return dias;
+        }
+
+        function clicMesSiguiente() {
+            const cal = document.querySelector('div[nombrecontrol="Calendario"]');
+            if (!cal) return false;
+            const btn = cal.querySelector(
+                '.k-nav-next, .k-calendar-nav-next, [aria-label="Next"], [aria-label="Siguiente"]',
+            );
+            if (!btn) return false;
+            clicar(resolverObjetivo(btn));
+            return true;
         }
 
         async function abrirCalendario() {
@@ -1088,6 +1116,7 @@
         async function esperarDiasHabilitados() {
             const limite = Date.now() + restoO(timeoutDiasMs);
             let aviso = 0;
+            let mesesAdelante = 0;
             while (Date.now() < limite) {
                 recargarSiBloqueoSeguridad();
                 if (estaCargando()) {
@@ -1097,6 +1126,13 @@
                 await abrirCalendario();
                 const dias = listarDiasHabilitados();
                 if (dias.length) return dias;
+                // Octubre sin cupo y noviembre solo en la flecha: pasar de mes.
+                if (mesesAdelante < 2 && calendarioAbierto() && clicMesSiguiente()) {
+                    mesesAdelante++;
+                    log(`   sin días en este mes; pasando al siguiente (${mesesAdelante})`);
+                    await esperarSinCarga(restoO(15000));
+                    continue;
+                }
                 if (Date.now() - aviso > 15000) {
                     aviso = Date.now();
                     log(`   calendario visible, aún sin días habilitados (${Math.ceil(resto() / 1000)} s restantes)`);

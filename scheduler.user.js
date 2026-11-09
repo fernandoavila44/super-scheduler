@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Super Scheduler (sandbox)
 // @namespace    super-scheduler
-// @version      1.34-sandbox
+// @version      1.35-sandbox
 // @description  [SANDBOX] Appointment scheduling monitor
 // @match        https://agendamiento.dian.gov.co/*
 // @run-at       document-idle
@@ -165,13 +165,13 @@
             },
             // La alarma y CUPOS ya salieron al elegir fecha y hora.
             { accion: 'captcha', desc: 'Captcha (manual)' },
-            // El campo del documento solo se muestra con el captcha resuelto, y la
-            // consulta se dispara al salir del campo. La sincronía es esperaHasta.
+            // Tipo + número: se mantienen aunque el captcha caduque. El número
+            // solo aparece con captcha resuelto; la consulta va al salir del campo.
             {
                 accion: 'documento',
                 desc: 'Número de documento',
                 esperaHasta:
-                    'div[nombrecontrol="DatosCorretos"] input[type="radio"][value="1"], div[nombrecontrol="TerminosCondiciones"] input[type="checkbox"]',
+                    'div[nombrecontrol="DatosCorretos"] input[type="radio"][value="1"]',
                 espera: 200,
             },
             {
@@ -243,6 +243,17 @@
             selToken: '#g-recaptcha-response',
             // Margen para que llegues al navegador y lo marques.
             timeoutMs: 10 * 60 * 1000,
+        },
+
+        // PasoTres: el player vacía tipo/número cuando el captcha caduca o la
+        // consulta tarda. El script los vuelve a poner en cada sondeo.
+        documento: {
+            selTipo: 'div[nombrecontrol="TipoDocumento"] select.customSelect',
+            // Texto de la opción (sin tildes; normalizar() las quita al comparar).
+            tipoContiene: 'cedula de ciudadania',
+            selNumero: '#divPasoTresNumeroDocumento input',
+            // Cada cuánto se reaplican tipo/número mientras se espera.
+            reaplicarMs: 1200,
         },
 
         // Pasos posteriores al captcha: la cita ya está a la vista y recargar la
@@ -1338,11 +1349,110 @@
         return visibleEnPantalla(paso);
     }
 
+    function captchaTokenActual() {
+        const token = document.querySelector(CONFIG.captcha.selToken);
+        return token && token.value ? token.value : '';
+    }
+
+    // True si hay un token nuevo respecto al último consumido (o el vigente).
+    function captchaResueltoNuevo() {
+        const valor = captchaTokenActual();
+        return !!(valor && valor !== tokenCaptchaUsado);
+    }
+
+    // El player borra tipo/número al caducar el captcha. Se reponen sin abrir el
+    // desplegable si ya está bien; solo se abre cuando falta o quedó vacío.
+    function tipoDocumentoActualOk(select) {
+        if (!select) return false;
+        const opt = select.options[select.selectedIndex];
+        if (!opt || String(opt.value || '').trim() === '') return false;
+        const objetivo = normalizar(CONFIG.documento.tipoContiene);
+        return normalizar(opt.textContent).includes(objetivo);
+    }
+
+    function opcionTipoDocumento(select) {
+        if (!select) return null;
+        const objetivo = normalizar(CONFIG.documento.tipoContiene);
+        return (
+            Array.from(select.options).find(
+                (o) => o.value !== '' && normalizar(o.textContent).includes(objetivo),
+            ) || null
+        );
+    }
+
+    // Si las opciones ya están en el DOM, aplica sin esperar. No abre el combo.
+    function reponerTipoDocumentoSiListo() {
+        const select = document.querySelector(CONFIG.documento.selTipo);
+        if (!select || !visibleEnPantalla(select)) return false;
+        if (tipoDocumentoActualOk(select)) return true;
+        const opcion = opcionTipoDocumento(select);
+        if (!opcion) return false;
+        aplicarOpcionSelect(select, opcion);
+        log(`   tipo documento: ${opcion.textContent.trim()}`);
+        return true;
+    }
+
+    async function asegurarTipoDocumento(timeoutMs = 5000) {
+        const select = document.querySelector(CONFIG.documento.selTipo);
+        if (!select || !visibleEnPantalla(select)) return false;
+        if (tipoDocumentoActualOk(select)) return true;
+        if (reponerTipoDocumentoSiListo()) return true;
+        if (timeoutMs <= 0) return false;
+
+        const objetivo = normalizar(CONFIG.documento.tipoContiene);
+        const opcion = await elegirOpcion(
+            select,
+            (o) => o.value !== '' && normalizar(o.textContent).includes(objetivo),
+            timeoutMs,
+        );
+        if (!opcion) return false;
+        log(`   tipo documento: ${opcion.textContent.trim()}`);
+        return true;
+    }
+
+    // Escribe la cédula si el campo está visible. Solo dispara la consulta
+    // (blur) cuando el valor cambió o se pide explícitamente tras un captcha nuevo.
+    function asegurarNumeroDocumento(opts = {}) {
+        if (!clienteActual) return false;
+        const campo = document.querySelector(CONFIG.documento.selNumero);
+        if (!campo) return false;
+        const wrap = campo.closest('#divPasoTresNumeroDocumento') || campo;
+        if (!visibleEnPantalla(wrap) && !visibleEnPantalla(campo)) return false;
+
+        const esperado = String(clienteActual.cedula);
+        const actual = String(campo.value || '');
+        if (actual === esperado && !opts.forzarConsulta) return true;
+
+        campo.scrollIntoView({ block: 'center' });
+        campo.focus();
+        if (actual !== esperado) {
+            campo.value = '';
+            campo.value = esperado;
+            disparar(campo, ['input', 'change', 'keyup']);
+            log(`   documento ${esperado}`);
+        }
+        campo.blur();
+        clicar(document.body);
+        return true;
+    }
+
+    // Reposición rápida (sin bloquear el sondeo del captcha).
+    function mantenerDatosDocumentoRapido(opts = {}) {
+        reponerTipoDocumentoSiListo();
+        asegurarNumeroDocumento({ forzarConsulta: !!opts.forzarConsulta });
+    }
+
+    async function mantenerDatosDocumento(opts = {}) {
+        await asegurarTipoDocumento(opts.timeoutTipo ?? 4000);
+        asegurarNumeroDocumento({ forzarConsulta: !!opts.forzarConsulta });
+    }
+
     // El reCAPTCHA vive en un iframe de google.com: el script no puede marcarlo
     // (es otro origen) y Google rechaza los clics sintéticos incluso si pudiera.
     // Lo resuelve la persona. El sonido viene del trámite; CUPOS, de la hora.
     async function esperarCaptcha() {
-        const { selToken, timeoutMs } = CONFIG.captcha;
+        const { timeoutMs } = CONFIG.captcha;
+        const reaplicarMs = (CONFIG.documento && CONFIG.documento.reaplicarMs) || 1200;
 
         const limiteUi = Date.now() + CONFIG.timeoutElementoMs;
         while (Date.now() < limiteUi && !captchaUiPresente()) {
@@ -1351,16 +1461,27 @@
         if (!captchaUiPresente()) throw new Error('No apareció el captcha');
         log('captcha en pantalla, esperando que lo marquen');
 
+        // Primera pasada: abrir el combo de tipo si hace falta (una sola vez).
+        await asegurarTipoDocumento(Math.min(8000, CONFIG.timeoutElementoMs));
+
         const limite = Date.now() + timeoutMs;
         let tarde = false;
+        let proximoMantener = 0;
         while (Date.now() < limite) {
             if (!tarde) tarde = marcarTerminosTemprano();
-            const token = document.querySelector(selToken);
+            // Tipo (y número si ya se ve) no deben quedar vacíos si el player
+            // reinicia el PasoTres mientras el captcha está pendiente o caduca.
+            // Solo reposición rápida: no abrir el combo en cada sondeo.
+            if (Date.now() >= proximoMantener) {
+                mantenerDatosDocumentoRapido();
+                proximoMantener = Date.now() + reaplicarMs;
+            }
             // Sin recargar entre clientes, el token del cliente anterior podría
             // seguir en el textarea: solo cuenta uno nuevo.
-            if (token && token.value && token.value !== tokenCaptchaUsado) {
-                tokenCaptchaUsado = token.value;
+            if (captchaResueltoNuevo()) {
+                tokenCaptchaUsado = captchaTokenActual();
                 pararAlarma();
+                await mantenerDatosDocumento({ forzarConsulta: true });
                 log('captcha resuelto, continuando');
                 return true;
             }
@@ -1368,6 +1489,20 @@
         }
         pararAlarma();
         throw new Error('el captcha no se resolvió a tiempo');
+    }
+
+    // Tras un captcha ya resuelto: si el token se vació (caducó), vuelve a
+    // esperar uno nuevo sin perder tipo/número.
+    async function asegurarCaptchaVigente() {
+        if (captchaTokenActual()) return true;
+        log('   captcha expiró; manteniendo documento y esperando nuevo captcha');
+        alarma('Captcha expiró. Vuelve a marcarlo; el documento se mantiene.', {
+            titulo: false,
+        });
+        // Conservar el token viejo: el siguiente valor distinto cuenta como nuevo.
+        if (!tokenCaptchaUsado) tokenCaptchaUsado = 'expirado';
+        await esperarCaptcha();
+        return true;
     }
 
     // El check de términos ya está en pantalla junto al captcha: se marca mientras
@@ -1544,38 +1679,59 @@
     }
 
     // La consulta del documento se dispara al salir del campo. Si la página está
-    // lenta y no responde, se vuelve a escribir y a salir del campo; si tampoco,
-    // se pide ayuda en vez de abortar (ya pasó el captcha).
+    // lenta, el captcha caduca o el player limpia el formulario, se reponen tipo
+    // y número y se reintenta; si tampoco, se pide ayuda (ya pasó el captcha).
     async function escribirDocumento() {
         if (!clienteActual) throw new Error('No hay un cliente seleccionado para el documento');
 
         const { intentosDocumento, reintentoMs } = CONFIG.faseFinal;
-        const selRespuesta = [
-            'div[nombrecontrol="DatosCorretos"] input[type="radio"][value="1"]',
-            'div[nombrecontrol="TerminosCondiciones"] input[type="checkbox"]',
-        ];
+        const reaplicarMs = (CONFIG.documento && CONFIG.documento.reaplicarMs) || 1200;
+        const selNumero = (CONFIG.documento && CONFIG.documento.selNumero) || '#divPasoTresNumeroDocumento input';
+        // Solo DatosCorretos: los términos ya están visibles junto al captcha y
+        // no sirven como señal de que la consulta del documento respondió.
+        const selRespuesta = 'div[nombrecontrol="DatosCorretos"] input[type="radio"][value="1"]';
         const respondio = () => !!primeroVisible(selRespuesta);
 
         for (let intento = 1; intento <= intentosDocumento; intento++) {
-            const campo = await esperarElemento(
-                '#divPasoTresNumeroDocumento input',
-                null,
-                CONFIG.timeoutElementoMs,
-            );
+            await asegurarCaptchaVigente();
+            await asegurarTipoDocumento(CONFIG.timeoutElementoMs);
+
+            const campo = await esperarElemento(selNumero, null, CONFIG.timeoutElementoMs);
             if (!campo) break;
             if (intento > 1) log(`   la consulta del documento no respondió; intento ${intento}`);
 
-            campo.scrollIntoView({ block: 'center' });
-            campo.focus();
-            campo.value = '';
-            campo.value = String(clienteActual.cedula);
-            disparar(campo, ['input', 'change', 'keyup']);
-            campo.blur();
-            clicar(document.body);
-            log(`   documento ${clienteActual.cedula}`);
+            asegurarNumeroDocumento({ forzarConsulta: true });
 
             await esperarSinCarga();
-            if (await esperarCualquiera(selRespuesta, reintentoMs * 2)) return;
+            let limiteEspera = Date.now() + reintentoMs * 2;
+            let proximoMantener = 0;
+            while (Date.now() < limiteEspera) {
+                if (respondio()) return;
+                // Caducó a mitad de la consulta: reponer datos y esperar remarcado.
+                if (!captchaTokenActual()) {
+                    await asegurarCaptchaVigente();
+                    await mantenerDatosDocumento({ forzarConsulta: true });
+                    limiteEspera = Date.now() + reintentoMs * 2;
+                    proximoMantener = Date.now() + reaplicarMs;
+                    continue;
+                }
+                if (Date.now() >= proximoMantener) {
+                    mantenerDatosDocumentoRapido();
+                    const selTipo = document.querySelector(CONFIG.documento.selTipo);
+                    // Si el player reconstruyó el combo vacío, hay que abrirlo otra vez.
+                    if (selTipo && visibleEnPantalla(selTipo) && !tipoDocumentoActualOk(selTipo)) {
+                        await asegurarTipoDocumento(3000);
+                        asegurarNumeroDocumento({ forzarConsulta: true });
+                    }
+                    proximoMantener = Date.now() + reaplicarMs;
+                }
+                if (estaCargando()) {
+                    await dormir(200);
+                    continue;
+                }
+                await dormir(200);
+            }
+            if (respondio()) return;
         }
         if (!respondio()) throw fallaFaseFinal('La consulta del documento no responde');
     }

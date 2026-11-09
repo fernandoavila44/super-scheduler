@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Super Scheduler (sandbox)
 // @namespace    super-scheduler
-// @version      1.33-sandbox
+// @version      1.34-sandbox
 // @description  [SANDBOX] Appointment scheduling monitor
 // @match        https://agendamiento.dian.gov.co/*
 // @run-at       document-idle
@@ -50,7 +50,7 @@
             // Nombre exacto de la pestaña; vacío = se elige en el dropdown del panel.
             hoja: '',
             // Opciones del dropdown (deben coincidir con los nombres de las pestañas).
-            ciudades: ['Bogota', 'Medellin', 'Cali', 'Bucaramanga'],
+            ciudades: ['Bogota', 'Medellin', 'Cali', 'Bucaramanga', 'Manizales'],
             timeoutMs: 15000,
             // La lista guardada se usa sin consultar la Sheet si tiene menos de
             // esto; si es más vieja, se refresca en segundo plano sin frenar el ciclo.
@@ -260,11 +260,11 @@
         },
 
         alarma: {
-            bipsPorRafaga: 12,
+            bipsPorRafaga: 6,
             // La alarma se repite hasta que marcas el captcha, no suena una sola vez.
-            segundosEntreRafagas: 10,
-            // 0 a 1. Por encima de 0.8 la onda cuadrada empieza a saturar.
-            volumen: 0.8,
+            segundosEntreRafagas: 12,
+            // 0 a 1. Intermedio: audible sin obligar a bajar el volumen del PC.
+            volumen: 0.28,
         },
 
         // Aviso que muestra la página cuando la combinación elegida no tiene cupo.
@@ -973,13 +973,28 @@
     function aplicarOpcionSelect(select, opcion) {
         // selectedIndex es más fiable que value con cadenas tipo
         // "10/15/2026 2:00:00 PM" (formato real del select de Horas DIAN).
-        select.selectedIndex = opcion.index;
-        opcion.selected = true;
-        if (String(opcion.value || '').trim() !== '') {
-            select.value = opcion.value;
+        // Si el player recreó el <select>, la opción vieja ya no sirve: se
+        // reubica por value o por texto en el select actual.
+        let objetivo = opcion;
+        if (!objetivo || objetivo.parentElement !== select) {
+            const value = String((opcion && opcion.value) || '').trim();
+            const texto = ((opcion && opcion.textContent) || '').replace(/\s+/g, ' ').trim();
+            objetivo =
+                (value && Array.from(select.options).find((o) => String(o.value).trim() === value)) ||
+                (texto &&
+                    Array.from(select.options).find(
+                        (o) => (o.textContent || '').replace(/\s+/g, ' ').trim() === texto,
+                    )) ||
+                opcion;
+        }
+        if (!objetivo) return false;
+        select.selectedIndex = objetivo.index;
+        objetivo.selected = true;
+        if (String(objetivo.value || '').trim() !== '') {
+            select.value = objetivo.value;
         }
         disparar(select, ['input', 'change']);
-        select.blur();
+        return true;
     }
 
     // Formato real DIAN: texto "2:00 PM" / value "10/15/2026 2:00:00 PM".
@@ -1170,7 +1185,7 @@
                     await esperarSinCarga(restoO(30000));
                     continue;
                 }
-                const select = selectHoras();
+                let select = selectHoras();
                 const elegida = horaSeleccionada(select);
                 if (elegida && (aplicaciones > 0 || siguienteListo())) {
                     return { select, opcion: elegida, texto: elegida.textContent.trim() };
@@ -1181,15 +1196,16 @@
 
                 let opcion = select && Array.from(select.options).find(esOpcionHora);
                 // El customSelect a menudo nace vacío: las horas llegan al abrirlo.
-                if (select && !opcion && Date.now() - ultimoClic > 1500 && clics < 8) {
+                if (select && !opcion && Date.now() - ultimoClic > 1200 && clics < 12) {
                     select.scrollIntoView({ block: 'center' });
                     select.focus();
                     clicar(select);
                     clics++;
                     ultimoClic = Date.now();
                     log(`   abriendo selector de horas (clic ${clics})`);
-                    await dormir(400);
-                    opcion = Array.from(selectHoras()?.options || []).find(esOpcionHora);
+                    await dormir(700);
+                    select = selectHoras();
+                    opcion = select && Array.from(select.options).find(esOpcionHora);
                 }
                 if (!opcion) {
                     if (Date.now() - aviso > 15000) {
@@ -1205,9 +1221,20 @@
 
                 aplicaciones++;
                 ultimaTexto = opcion.textContent.trim();
+                const valueGuardado = String(opcion.value || '').trim();
                 log(`   aplicando hora ${ultimaTexto} (intento ${aplicaciones})`);
-                select.focus();
-                aplicarOpcionSelect(select, opcion);
+
+                // Releer el select: el player puede haberlo recreado entre el
+                // clic de abrir y ahora; aplicar sobre el nodo viejo no marca nada.
+                select = selectHoras();
+                if (!select || !aplicarOpcionSelect(select, opcion)) {
+                    log('   no se pudo aplicar la hora en el select actual');
+                    await dormir(400);
+                    continue;
+                }
+                // No blur inmediato: a veces el player borra la selección al
+                // salir del campo antes de aceptar el change.
+                await dormir(300);
 
                 const limiteConfirmar = Math.min(limite, Date.now() + confirmarHoraMs);
                 while (Date.now() < limiteConfirmar) {
@@ -1215,6 +1242,21 @@
                     const actual = selectHoras();
                     const ok = horaSeleccionada(actual);
                     if (ok) return { select: actual, opcion: ok, texto: ok.textContent.trim() };
+                    // Aceptada por el player aunque haya rehecho el select.
+                    if (
+                        valueGuardado &&
+                        actual &&
+                        String(actual.value || '').trim() === valueGuardado
+                    ) {
+                        const misma = Array.from(actual.options).find(
+                            (o) => String(o.value || '').trim() === valueGuardado,
+                        );
+                        return {
+                            select: actual,
+                            opcion: misma || null,
+                            texto: (misma && misma.textContent.trim()) || ultimaTexto,
+                        };
+                    }
                     if (siguienteListo()) return { select: actual, opcion: null, texto: ultimaTexto };
                 }
                 const actual = selectHoras();
@@ -1252,6 +1294,9 @@
             clicar(dia);
             await esperarSinCarga(restoO(30000));
             await dormir(CONFIG.esperaTrasClicMs ?? 200);
+            // Dar tiempo a que el combo de horas exista antes de abrirlo.
+            const limiteSelect = Date.now() + Math.min(8000, restoO(8000));
+            while (Date.now() < limiteSelect && !selectHoras()) await dormir(200);
 
             const resultado = await esperarYElegirHora();
             if (resultado.opcion || resultado.texto) {
@@ -1828,16 +1873,17 @@
                 for (let i = 0; i < bipsPorRafaga; i++) {
                     const osc = ctx.createOscillator();
                     const gan = ctx.createGain();
-                    osc.type = 'square';
-                    osc.frequency.value = i % 2 ? 880 : 1245;
+                    // Seno + volumen medio: menos chillón que la onda cuadrada.
+                    osc.type = 'sine';
+                    osc.frequency.value = i % 2 ? 740 : 980;
                     gan.gain.setValueAtTime(0, t);
-                    gan.gain.linearRampToValueAtTime(volumen, t + 0.01);
-                    gan.gain.setValueAtTime(volumen, t + 0.3);
-                    gan.gain.linearRampToValueAtTime(0, t + 0.35);
+                    gan.gain.linearRampToValueAtTime(volumen, t + 0.02);
+                    gan.gain.setValueAtTime(volumen, t + 0.22);
+                    gan.gain.linearRampToValueAtTime(0, t + 0.3);
                     osc.connect(gan).connect(ctx.destination);
                     osc.start(t);
-                    osc.stop(t + 0.36);
-                    t += 0.45;
+                    osc.stop(t + 0.32);
+                    t += 0.4;
                 }
             };
 

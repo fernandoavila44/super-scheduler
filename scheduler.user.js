@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Super Scheduler (sandbox)
 // @namespace    super-scheduler
-// @version      1.36-sandbox
+// @version      1.37-sandbox
 // @description  [SANDBOX] Appointment scheduling monitor
 // @match        https://agendamiento.dian.gov.co/*
 // @run-at       document-idle
@@ -252,8 +252,10 @@
             // Texto de la opción (sin tildes; normalizar() las quita al comparar).
             tipoContiene: 'cedula de ciudadania',
             selNumero: '#divPasoTresNumeroDocumento input',
-            // Cada cuánto se reaplican tipo/número mientras se espera.
-            reaplicarMs: 1200,
+            // Solo se repone el tipo si el player lo vació; no reconsultar cada tick.
+            reaplicarMs: 2500,
+            // Espera máxima a que aparezca DatosCorretos tras el blur de la cédula.
+            timeoutConsultaMs: 90000,
         },
 
         // Pasos posteriores al captcha: la cita ya está a la vista y recargar la
@@ -925,7 +927,9 @@
     }
 
     function buscar(sel, contiene) {
-        const nodos = Array.from(document.querySelectorAll(sel)).filter(visible);
+        const nodos = Array.from(document.querySelectorAll(sel)).filter(
+            (n) => visible(n) || visibleEnPantalla(n),
+        );
         if (!contiene) return nodos[0] || null;
         const objetivo = contiene.trim().toLowerCase();
         return nodos.find((n) => (n.innerText || n.value || '').trim().toLowerCase().includes(objetivo)) || null;
@@ -1448,10 +1452,11 @@
         return true;
     }
 
-    // Reposición rápida (sin bloquear el sondeo del captcha).
-    function mantenerDatosDocumentoRapido(opts = {}) {
+    // Solo tipo de documento mientras el captcha está pendiente. El número y el
+    // blur de consulta se hacen UNA vez en escribirDocumento (reconsultar aquí
+    // vaciaba el token y trababa el PasoTres).
+    function mantenerTipoDocumentoRapido() {
         reponerTipoDocumentoSiListo();
-        asegurarNumeroDocumento({ forzarConsulta: !!opts.forzarConsulta });
     }
 
     async function mantenerDatosDocumento(opts = {}) {
@@ -1464,7 +1469,7 @@
     // Lo resuelve la persona. El sonido viene del trámite; CUPOS, de la hora.
     async function esperarCaptcha() {
         const { timeoutMs } = CONFIG.captcha;
-        const reaplicarMs = (CONFIG.documento && CONFIG.documento.reaplicarMs) || 1200;
+        const reaplicarMs = (CONFIG.documento && CONFIG.documento.reaplicarMs) || 2500;
 
         const limiteUi = Date.now() + CONFIG.timeoutElementoMs;
         while (Date.now() < limiteUi && !captchaUiPresente()) {
@@ -1481,21 +1486,16 @@
         let proximoMantener = 0;
         while (Date.now() < limite) {
             if (!tarde) tarde = marcarTerminosTemprano();
-            // Tipo (y número si ya se ve) no deben quedar vacíos si el player
-            // reinicia el PasoTres mientras el captcha está pendiente o caduca.
-            // Solo reposición rápida: no abrir el combo en cada sondeo.
             if (Date.now() >= proximoMantener) {
-                mantenerDatosDocumentoRapido();
+                mantenerTipoDocumentoRapido();
                 proximoMantener = Date.now() + reaplicarMs;
             }
-            // Sin recargar entre clientes, el token del cliente anterior podría
-            // seguir en el textarea: solo cuenta uno nuevo.
-            // Si el operario terminó la cita a mano mientras esperábamos, guardar.
             await registrarSiModalCitaConfirmada();
             if (captchaResueltoNuevo()) {
                 tokenCaptchaUsado = captchaTokenActual();
                 pararAlarma();
-                await mantenerDatosDocumento({ forzarConsulta: true });
+                // No forzar consulta aquí: escribirDocumento lo hace una sola vez.
+                reponerTipoDocumentoSiListo();
                 log('captcha resuelto, continuando');
                 return true;
             }
@@ -1528,35 +1528,13 @@
         return !!(tokenCaptchaUsado && tokenCaptchaUsado !== 'expirado');
     }
 
-    // Tras consultar el documento el player suele vaciar #g-recaptcha-response
-    // aunque la página ya aceptó el captcha. Solo se pide remarcado si aún no
-    // habíamos resuelto uno en este ciclo (o el flujo no ha avanzado nada).
+    // El player vacía el textarea al consultar la cédula. Si YA resolvimos un
+    // captcha en este ciclo, NUNCA se vuelve a bloquear el flujo por eso.
     async function asegurarCaptchaVigente() {
-        if (captchaTokenActual()) return true;
+        if (captchaTokenActual() || captchaYaResueltoEnCiclo()) return true;
 
-        if (captchaYaResueltoEnCiclo()) {
-            const datosOk = !!primeroVisible(
-                'div[nombrecontrol="DatosCorretos"] input[type="radio"][value="1"]',
-            );
-            const num =
-                document.querySelector(
-                    (CONFIG.documento && CONFIG.documento.selNumero) ||
-                        '#divPasoTresNumeroDocumento input',
-                );
-            const numVisible =
-                num &&
-                String(num.value || '').trim() &&
-                (visibleEnPantalla(num) ||
-                    visibleEnPantalla(num.closest('#divPasoTresNumeroDocumento') || num));
-            // Token vacío con captcha ya usado = normal. Seguir.
-            if (datosOk || numVisible || !captchaUiPresente()) {
-                log('   token vacío tras captcha ya resuelto; se sigue sin remarcado');
-                return true;
-            }
-        }
-
-        log('   captcha expiró; manteniendo documento y esperando nuevo captcha');
-        alarma('Captcha expiró. Vuelve a marcarlo; el documento se mantiene.', {
+        log('   captcha pendiente; manteniendo documento y esperando marcado');
+        alarma('Captcha pendiente. Márcalo; el documento se mantiene.', {
             titulo: false,
         });
         if (!tokenCaptchaUsado) tokenCaptchaUsado = 'expirado';
@@ -1635,9 +1613,19 @@
                 await dormir(200);
                 continue;
             }
-            const el = primeroVisible(paso.sel);
+            // Siguiente a veces solo existe como btnSiguienteBlock hasta que
+            // DatosCorretos+términos quedan OK; se insiste en el habilitado.
+            let el = primeroVisible(paso.sel);
+            if (!el && paso.sel && paso.sel.includes('btnSiguiente')) {
+                el = primeroVisible(paso.sel.replace('btnSiguiente', 'btnSiguienteBlock'));
+            }
             if (!el) {
                 await dormir(100);
+                continue;
+            }
+            // Block = deshabilitado: no spamear clic; esperar a que habilite.
+            if (el.getAttribute('nombre') === 'btnSiguienteBlock') {
+                await dormir(200);
                 continue;
             }
             clics++;
@@ -1737,21 +1725,23 @@
         throw new SinCupo('ningún cliente pendiente coincide con los trámites disponibles');
     }
 
-    // La consulta del documento se dispara al salir del campo. Si la página está
-    // lenta, el captcha caduca o el player limpia el formulario, se reponen tipo
-    // y número y se reintenta; si tampoco, se pide ayuda (ya pasó el captcha).
+    // Una consulta limpia por intento: blur + clic afuera, sin reconsultar cada
+    // 1 s (eso vaciaba el token y dejaba el PasoTres a medias).
     async function escribirDocumento() {
         if (!clienteActual) throw new Error('No hay un cliente seleccionado para el documento');
 
-        const { intentosDocumento, reintentoMs } = CONFIG.faseFinal;
-        const reaplicarMs = (CONFIG.documento && CONFIG.documento.reaplicarMs) || 1200;
-        const selNumero = (CONFIG.documento && CONFIG.documento.selNumero) || '#divPasoTresNumeroDocumento input';
-        // Solo DatosCorretos: los términos ya están visibles junto al captcha y
-        // no sirven como señal de que la consulta del documento respondió.
-        const selRespuesta = 'div[nombrecontrol="DatosCorretos"] input[type="radio"][value="1"]';
+        const { intentosDocumento } = CONFIG.faseFinal;
+        const timeoutConsulta =
+            (CONFIG.documento && CONFIG.documento.timeoutConsultaMs) || 90000;
+        const selNumero =
+            (CONFIG.documento && CONFIG.documento.selNumero) ||
+            '#divPasoTresNumeroDocumento input';
+        const selRespuesta =
+            'div[nombrecontrol="DatosCorretos"] input[type="radio"][value="1"]';
         const respondio = () => !!primeroVisible(selRespuesta);
 
         for (let intento = 1; intento <= intentosDocumento; intento++) {
+            // Solo bloquea si NUNCA se resolvió captcha en este ciclo.
             await asegurarCaptchaVigente();
             await asegurarTipoDocumento(CONFIG.timeoutElementoMs);
 
@@ -1760,41 +1750,47 @@
             if (intento > 1) log(`   la consulta del documento no respondió; intento ${intento}`);
 
             asegurarNumeroDocumento({ forzarConsulta: true });
-
             await esperarSinCarga();
-            let limiteEspera = Date.now() + reintentoMs * 2;
-            let proximoMantener = 0;
+
+            const limiteEspera = Date.now() + timeoutConsulta;
+            let aviso = 0;
             while (Date.now() < limiteEspera) {
-                if (respondio()) return;
-                await registrarSiModalCitaConfirmada();
-                // Token vacío tras un captcha ya resuelto es normal; solo remarca
-                // si asegurarCaptchaVigente decide que hace falta.
-                if (!captchaTokenActual()) {
-                    const antes = tokenCaptchaUsado;
-                    await asegurarCaptchaVigente();
-                    if (tokenCaptchaUsado !== antes || captchaTokenActual()) {
-                        await mantenerDatosDocumento({ forzarConsulta: true });
-                        limiteEspera = Date.now() + reintentoMs * 2;
-                        proximoMantener = Date.now() + reaplicarMs;
-                    }
-                    await dormir(200);
-                    continue;
+                if (respondio()) {
+                    log('   DatosCorretos visible tras consulta');
+                    return;
                 }
-                if (Date.now() >= proximoMantener) {
-                    mantenerDatosDocumentoRapido();
-                    const selTipo = document.querySelector(CONFIG.documento.selTipo);
-                    // Si el player reconstruyó el combo vacío, hay que abrirlo otra vez.
-                    if (selTipo && visibleEnPantalla(selTipo) && !tipoDocumentoActualOk(selTipo)) {
-                        await asegurarTipoDocumento(3000);
-                        asegurarNumeroDocumento({ forzarConsulta: true });
-                    }
-                    proximoMantener = Date.now() + reaplicarMs;
+                await registrarSiModalCitaConfirmada();
+                // Si el player borró el número, una sola reposición (no cada tick).
+                const actual = document.querySelector(selNumero);
+                if (
+                    actual &&
+                    String(actual.value || '').trim() !== String(clienteActual.cedula) &&
+                    (visibleEnPantalla(actual) ||
+                        visibleEnPantalla(actual.closest('#divPasoTresNumeroDocumento') || actual))
+                ) {
+                    log('   el player vació la cédula; se reescribe una vez');
+                    asegurarNumeroDocumento({ forzarConsulta: true });
+                    await esperarSinCarga();
+                } else if (
+                    document.querySelector(CONFIG.documento.selTipo) &&
+                    visibleEnPantalla(document.querySelector(CONFIG.documento.selTipo)) &&
+                    !tipoDocumentoActualOk(document.querySelector(CONFIG.documento.selTipo))
+                ) {
+                    reponerTipoDocumentoSiListo();
+                }
+                if (Date.now() - aviso > 15000) {
+                    aviso = Date.now();
+                    log(
+                        `   esperando respuesta del documento (${Math.ceil(
+                            (limiteEspera - Date.now()) / 1000,
+                        )} s)`,
+                    );
                 }
                 if (estaCargando()) {
                     await dormir(200);
                     continue;
                 }
-                await dormir(200);
+                await dormir(250);
             }
             if (respondio()) return;
         }

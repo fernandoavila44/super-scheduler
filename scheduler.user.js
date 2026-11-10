@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Super Scheduler
 // @namespace    super-scheduler
-// @version      1.35
+// @version      1.36
 // @description  Appointment scheduling monitor
 // @match        https://agendamiento.dian.gov.co/*
 // @run-at       document-idle
@@ -663,22 +663,34 @@
                   }`,
         );
 
-        try {
-            await actualizarClienteSheet({
-                cedula: cliente.cedula,
-                scheduled: true,
-                date: sinFechaHora ? '' : cita.fecha,
-                hour: sinFechaHora ? '' : cita.hora,
-                name: persona.nombre,
-                email: persona.correo,
-            });
-            log(
-                sinFechaHora
-                    ? '   Sheet actualizada (scheduled=true, date/hour vacíos, name/email)'
-                    : '   Sheet actualizada (scheduled/date/hour/name/email)',
-            );
-        } catch (e) {
-            log('   no se pudo actualizar la Sheet: ' + e.message);
+        const payload = {
+            cedula: cliente.cedula,
+            scheduled: true,
+            date: sinFechaHora ? '' : cita.fecha,
+            hour: sinFechaHora ? '' : cita.hora,
+            name: persona.nombre,
+            email: persona.correo,
+        };
+        let ultimoError = '';
+        for (let intento = 1; intento <= 3; intento++) {
+            try {
+                await actualizarClienteSheet(payload);
+                log(
+                    sinFechaHora
+                        ? '   Sheet actualizada (scheduled=true, date/hour vacíos, name/email)'
+                        : '   Sheet actualizada (scheduled/date/hour/name/email)',
+                );
+                ultimoError = '';
+                break;
+            } catch (e) {
+                ultimoError = e.message;
+                log(`   Sheet intento ${intento}/3 falló: ${e.message}`);
+                if (intento < 3) await dormir(800 * intento);
+            }
+        }
+        if (ultimoError) {
+            log('   no se pudo actualizar la Sheet tras reintentos: ' + ultimoError);
+            pintar(`Cita local OK; Sheet falló: ${ultimoError}`, false);
         }
     }
 
@@ -1478,6 +1490,8 @@
             }
             // Sin recargar entre clientes, el token del cliente anterior podría
             // seguir en el textarea: solo cuenta uno nuevo.
+            // Si el operario terminó la cita a mano mientras esperábamos, guardar.
+            await registrarSiModalCitaConfirmada();
             if (captchaResueltoNuevo()) {
                 tokenCaptchaUsado = captchaTokenActual();
                 pararAlarma();
@@ -1491,15 +1505,60 @@
         throw new Error('el captcha no se resolvió a tiempo');
     }
 
-    // Tras un captcha ya resuelto: si el token se vació (caducó), vuelve a
-    // esperar uno nuevo sin perder tipo/número.
+    // ModalInfoCita a la vista (p. ej. el operario agendó a mano): registrar en Sheet.
+    async function registrarSiModalCitaConfirmada() {
+        const selOk =
+            'div[tipo="Control"][pantalla="ModalInfoCita"][nombre="btnAceptar"]';
+        const ok = primeroVisible(selOk);
+        if (!ok || !clienteActual) return false;
+        pararAlarma();
+        if (!datosPersonaActual.nombre && !datosPersonaActual.correo) {
+            datosPersonaActual = leerDatosPersona();
+        }
+        await marcarAgendado();
+        clicar(resolverObjetivo(ok));
+        log('   cita confirmada en pantalla → guardada en Sheet');
+        await esperarSinCarga(8000, { lanzarSinCupo: false });
+        await dormir(CONFIG.esperaTrasClicMs ?? 200);
+        throw new ClienteYaAgendado('cita confirmada; guardada en Sheet');
+    }
+
+    // True si ya resolvimos un captcha real en este ciclo (no el placeholder).
+    function captchaYaResueltoEnCiclo() {
+        return !!(tokenCaptchaUsado && tokenCaptchaUsado !== 'expirado');
+    }
+
+    // Tras consultar el documento el player suele vaciar #g-recaptcha-response
+    // aunque la página ya aceptó el captcha. Solo se pide remarcado si aún no
+    // habíamos resuelto uno en este ciclo (o el flujo no ha avanzado nada).
     async function asegurarCaptchaVigente() {
         if (captchaTokenActual()) return true;
+
+        if (captchaYaResueltoEnCiclo()) {
+            const datosOk = !!primeroVisible(
+                'div[nombrecontrol="DatosCorretos"] input[type="radio"][value="1"]',
+            );
+            const num =
+                document.querySelector(
+                    (CONFIG.documento && CONFIG.documento.selNumero) ||
+                        '#divPasoTresNumeroDocumento input',
+                );
+            const numVisible =
+                num &&
+                String(num.value || '').trim() &&
+                (visibleEnPantalla(num) ||
+                    visibleEnPantalla(num.closest('#divPasoTresNumeroDocumento') || num));
+            // Token vacío con captcha ya usado = normal. Seguir.
+            if (datosOk || numVisible || !captchaUiPresente()) {
+                log('   token vacío tras captcha ya resuelto; se sigue sin remarcado');
+                return true;
+            }
+        }
+
         log('   captcha expiró; manteniendo documento y esperando nuevo captcha');
         alarma('Captcha expiró. Vuelve a marcarlo; el documento se mantiene.', {
             titulo: false,
         });
-        // Conservar el token viejo: el siguiente valor distinto cuenta como nuevo.
         if (!tokenCaptchaUsado) tokenCaptchaUsado = 'expirado';
         await esperarCaptcha();
         return true;
@@ -1707,12 +1766,18 @@
             let proximoMantener = 0;
             while (Date.now() < limiteEspera) {
                 if (respondio()) return;
-                // Caducó a mitad de la consulta: reponer datos y esperar remarcado.
+                await registrarSiModalCitaConfirmada();
+                // Token vacío tras un captcha ya resuelto es normal; solo remarca
+                // si asegurarCaptchaVigente decide que hace falta.
                 if (!captchaTokenActual()) {
+                    const antes = tokenCaptchaUsado;
                     await asegurarCaptchaVigente();
-                    await mantenerDatosDocumento({ forzarConsulta: true });
-                    limiteEspera = Date.now() + reintentoMs * 2;
-                    proximoMantener = Date.now() + reaplicarMs;
+                    if (tokenCaptchaUsado !== antes || captchaTokenActual()) {
+                        await mantenerDatosDocumento({ forzarConsulta: true });
+                        limiteEspera = Date.now() + reintentoMs * 2;
+                        proximoMantener = Date.now() + reaplicarMs;
+                    }
+                    await dormir(200);
                     continue;
                 }
                 if (Date.now() >= proximoMantener) {

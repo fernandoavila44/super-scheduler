@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Super Scheduler (sandbox)
 // @namespace    super-scheduler
-// @version      1.38-sandbox
+// @version      1.39-sandbox
 // @description  [SANDBOX] Appointment scheduling monitor
 // @match        https://agendamiento.dian.gov.co/*
 // @run-at       document-idle
@@ -1394,31 +1394,22 @@
             return { select: selectHoras(), opcion: null, aplicaciones };
         }
 
-        // Tras elegir: sostener la hora hasta que Siguiente esté listo (el player
-        // a veces la vacía un segundo después de aceptarla).
+        // Tras elegir: 1–2 chequeos rápidos por si el player vacía el select.
+        // No espera a Siguiente (eso lo hace el paso siguiente); la hora se
+        // reafirma otra vez justo antes del clic en Siguiente.
         async function sostenerHoraElegida(resultado) {
             if (!resultado || !(resultado.opcion || resultado.texto)) return false;
             recordarHoraElegida(
                 resultado.texto,
                 (resultado.opcion && resultado.opcion.value) || (horaElegida && horaElegida.value) || '',
             );
-            const limite = Date.now() + Math.min(20000, restoO(20000));
-            let avisos = 0;
-            while (Date.now() < limite) {
-                await reaccionarSiModalError();
-                if (estaCargando()) {
-                    await esperarSinCarga(restoO(10000));
-                    continue;
-                }
-                const ok = horaActualOk() || (await reafirmarHoraElegida());
-                if (ok && siguienteListo()) return true;
-                if (!ok && avisos < 3) {
-                    avisos++;
-                    log('   esperando a que la hora se mantenga en el select');
-                }
-                await dormir(250);
+            for (let i = 0; i < 2; i++) {
+                await dormir(300);
+                if (estaCargando()) await esperarSinCarga(restoO(5000), { reaccionarModal: false });
+                if (horaActualOk()) continue;
+                await reafirmarHoraElegida();
             }
-            return horaActualOk() || (await reafirmarHoraElegida());
+            return horaActualOk();
         }
 
         horaElegida = null;

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Super Scheduler (sandbox)
 // @namespace    super-scheduler
-// @version      1.37-sandbox
+// @version      1.38-sandbox
 // @description  [SANDBOX] Appointment scheduling monitor
 // @match        https://agendamiento.dian.gov.co/*
 // @run-at       document-idle
@@ -280,23 +280,21 @@
             volumen: 0.28,
         },
 
-        // Aviso que muestra la página cuando la combinación elegida no tiene cupo.
-        // Se compara sin tildes, sin mayúsculas y con los espacios colapsados.
-        textoSinCupo: 'No se encontraron especialidades relacionadas según los filtros seleccionados',
-
         // Tras Agendar: el cliente ya tiene cita (agendó por fuera). Se marca
         // scheduled sin date/hour y se sigue con el siguiente, sin alarma.
+        // Única excepción de ModalError que NO se trata como "cerrar y reintentar".
         textosClienteConCita: [
             'El usuario excedió el número máximo de citas por día para el mismo servicio',
             'El usuario excedió el número máximo de citas solicitadas abiertas',
         ],
 
         // El player bloquea la petición: Aceptar deja la página trabada, recargar.
+        // Segunda excepción de ModalError (recarga, no solo Aceptar).
         textoBloqueoSeguridad: 'solicitud bloqueada por controles de seguridad',
 
         sinEspecialidades: {
-            // El aviso sale en la pantalla ModalError, que es genérica; el botón se
-            // localiza por su pantalla para no confundirlo con el de otro modal.
+            // Cualquier ModalError usa este Aceptar; el texto del aviso es dinámico
+            // y ya no se clasifica (salvo max citas / bloqueo seguridad).
             selAceptar: 'div[tipo="Control"][pantalla="ModalError"][nombre="btnAceptar"]',
             selServicios: 'div[nombrecontrol="Servicios"] select.customSelect',
             // Si Servicios ya tiene opciones se sale al momento; si no, se espera
@@ -345,6 +343,9 @@
     // Cliente cuyo trámite se eligió en este ciclo. Su cédula se usa en el PasoTres
     // y se marca agendado cuando aparece el modal de éxito.
     let clienteActual = null;
+    // Hora aceptada en PasoDos: el player a veces vacía el select después;
+    // se reaplica hasta pulsar Siguiente.
+    let horaElegida = null;
 
     const leerEstado = () => {
         try {
@@ -827,11 +828,10 @@
         return normalizar((modal && modal.innerText) || '');
     }
 
-    // Solo el aviso de especialidades — no cualquier ModalError (p. ej. máximo de citas).
-    function hayModalSinCupo() {
-        const aviso = normalizar(CONFIG.textoSinCupo);
-        if (!aviso) return false;
-        return textoModalErrorVisible().includes(aviso);
+    function textoModalErrorCrudo() {
+        if (!pantallaOverlayVisible('ModalError')) return '';
+        const modal = document.querySelector('div[nombrepantalla="ModalError"]');
+        return ((modal && modal.innerText) || '').replace(/\s+/g, ' ').trim();
     }
 
     // Devuelve el aviso de "cliente ya tiene cita" que esté en pantalla, o ''.
@@ -864,22 +864,45 @@
         log('   cerrando ModalError');
         clicar(resolverObjetivo(aceptar));
         await dormir(CONFIG.pausaEntrePasosMs);
-        await esperarSinCarga(5000, { lanzarSinCupo: false });
+        await esperarSinCarga(5000, { reaccionarModal: false });
         return true;
     }
 
-    async function cerrarAvisoSinCupo(motivo) {
+    // Cualquier ModalError: Aceptar → SinCupo (espera el intervalo de reintento).
+    // Excepciones: bloqueo seguridad (recarga) y máximo de citas (marcar scheduled).
+    // opts.dejarMaxCitas: el llamador (Agendar) maneja ese caso.
+    async function reaccionarSiModalError(opts = {}) {
+        if (!pantallaOverlayVisible('ModalError')) return false;
+        recargarSiBloqueoSeguridad();
+        const maxCitas = hayModalMaxCitasDia();
+        if (maxCitas) {
+            if (opts.dejarMaxCitas) return false;
+            pararAlarma();
+            log(`   ModalError: ${maxCitas}`);
+            await marcarAgendado({
+                sinFechaHora: true,
+                motivo: normalizar(maxCitas).includes('abiertas') ? 'max_citas_abiertas' : 'max_citas_dia',
+            });
+            await cerrarModalError();
+            throw new ClienteYaAgendado(
+                'cliente ya tenía el máximo de citas; marcado scheduled sin fecha/hora',
+            );
+        }
+        const crudo = textoModalErrorCrudo() || 'ModalError';
+        log(`   ModalError → Aceptar y esperar reintento: ${crudo}`);
         await cerrarModalError();
-        throw new SinCupo(motivo || 'no hay especialidades para el trámite');
+        throw new SinCupo(crudo);
     }
 
     async function esperarSinCarga(timeout, opts = {}) {
-        const lanzarSinCupo = opts.lanzarSinCupo !== false;
+        const reaccionarModal = opts.reaccionarModal !== false;
+        // Compat: lanzarSinCupo:false también desactiva la reacción al modal.
+        const activo = reaccionarModal && opts.lanzarSinCupo !== false;
         const porDefecto = (CONFIG.cargando && CONFIG.cargando.timeoutMs) || 15000;
         const limite = Date.now() + (timeout ?? porDefecto);
         while (Date.now() < limite) {
             recargarSiBloqueoSeguridad();
-            if (lanzarSinCupo && hayModalSinCupo()) await cerrarAvisoSinCupo();
+            if (activo) await reaccionarSiModalError(opts);
             if (!estaCargando()) {
                 await dormir(50);
                 if (!estaCargando()) return true;
@@ -899,7 +922,7 @@
         const limite = Date.now() + timeout;
         while (Date.now() < limite) {
             recargarSiBloqueoSeguridad();
-            if (hayModalSinCupo()) await cerrarAvisoSinCupo();
+            await reaccionarSiModalError();
             for (const sel of lista) {
                 const el = buscar(sel) || Array.from(document.querySelectorAll(sel)).find(visibleEnPantalla);
                 if (el) return el;
@@ -911,12 +934,15 @@
 
     async function estabilizarTrasPaso(paso) {
         recargarSiBloqueoSeguridad();
-        if (hayModalSinCupo()) await cerrarAvisoSinCupo();
+        await reaccionarSiModalError();
         await esperarSinCarga((CONFIG.cargando && CONFIG.cargando.timeoutMs) || 15000);
         if (paso.esperaHasta) {
             await esperarCualquiera(paso.esperaHasta, CONFIG.timeoutElementoMs);
         }
-        if (hayModalSinCupo()) await cerrarAvisoSinCupo();
+        await reaccionarSiModalError();
+        if (paso.accion === 'fechaYHora' || (paso.sel && /PasoDos.*btnSiguiente/.test(paso.sel))) {
+            await reafirmarHoraElegida();
+        }
         const ms =
             paso.espera !== undefined
                 ? paso.espera
@@ -1047,6 +1073,61 @@
             .join(' | ');
     }
 
+    function selectHorasActual() {
+        const sel = (CONFIG.fechaYHora && CONFIG.fechaYHora.selHoras) || 'div[nombrecontrol="Horas"] select.customSelect';
+        const caja = document.querySelector('div[nombrecontrol="Horas"]');
+        return (
+            (caja && caja.querySelector('select.customSelect, select')) ||
+            document.querySelector(sel) ||
+            buscar(sel) ||
+            null
+        );
+    }
+
+    function horaActualOk(select) {
+        const el = select || selectHorasActual();
+        if (!el || !horaElegida) return false;
+        const o = el.options[el.selectedIndex];
+        if (!esOpcionHora(o)) return false;
+        const value = String(o.value || '').trim();
+        const texto = (o.textContent || '').replace(/\s+/g, ' ').trim();
+        if (horaElegida.value && value && value === horaElegida.value) return true;
+        if (horaElegida.texto && texto && texto === horaElegida.texto) return true;
+        return false;
+    }
+
+    function recordarHoraElegida(texto, value) {
+        horaElegida = {
+            texto: ((texto || '') + '').replace(/\s+/g, ' ').trim(),
+            value: String(value || '').trim(),
+        };
+    }
+
+    // Si el player vació el select tras aceptar la hora, la vuelve a poner.
+    async function reafirmarHoraElegida() {
+        if (!horaElegida || (!horaElegida.value && !horaElegida.texto)) return false;
+        let select = selectHorasActual();
+        if (!select) return false;
+        if (horaActualOk(select)) return true;
+
+        const opcion =
+            (horaElegida.value &&
+                Array.from(select.options).find((o) => String(o.value || '').trim() === horaElegida.value)) ||
+            (horaElegida.texto &&
+                Array.from(select.options).find(
+                    (o) => (o.textContent || '').replace(/\s+/g, ' ').trim() === horaElegida.texto,
+                )) ||
+            null;
+        if (!opcion || !esOpcionHora(opcion)) {
+            log(`   hora perdida y no está en el select (${horaElegida.texto || horaElegida.value})`);
+            return false;
+        }
+        log(`   hora se borró; reaplicando ${horaElegida.texto || horaElegida.value}`);
+        if (!aplicarOpcionSelect(select, opcion)) return false;
+        await dormir(300);
+        return horaActualOk(selectHorasActual());
+    }
+
     // Las horas que ofrece la página dependen del día elegido, así que un día
     // habilitado en el calendario no garantiza horas libres. Se recorren los días
     // habilitados y se toma el primero que sí tenga horas.
@@ -1139,7 +1220,7 @@
                 Array.from(document.querySelectorAll(selBoton)).find(visibleEnPantalla) ||
                 (await esperarElemento(selBoton, null, restoO(CONFIG.timeoutElementoMs)));
             if (!boton) {
-                if (avisoSinCupo()) throw new SinCupo('la página avisó que no hay especialidades');
+                await reaccionarSiModalError();
                 if (resto() <= 0) throw new Error('No apareció el botón de fecha');
                 return false;
             }
@@ -1196,6 +1277,13 @@
             return !!(el && (visibleEnPantalla(el) || visible(el))) || !!buscar(selSiguiente);
         };
 
+        function empaquetarHora(select, opcion, texto) {
+            const txt = (texto || (opcion && opcion.textContent) || '').replace(/\s+/g, ' ').trim();
+            const val = String((opcion && opcion.value) || (select && select.value) || '').trim();
+            recordarHoraElegida(txt, val);
+            return { select, opcion: opcion || null, texto: txt };
+        }
+
         // Re-consulta el <select> en cada sondeo (el player puede recrearlo).
         // No se aborta a las 3 aplicaciones: si las horas se ven, se insiste
         // hasta el tope del paso.
@@ -1203,11 +1291,13 @@
             const limite = Date.now() + restoO(timeoutHorasMs);
             let aplicaciones = 0;
             let ultimaTexto = '';
+            let ultimoValue = '';
             let aviso = 0;
             let clics = 0;
             let ultimoClic = 0;
             while (Date.now() < limite) {
                 recargarSiBloqueoSeguridad();
+                await reaccionarSiModalError();
                 if (estaCargando()) {
                     await esperarSinCarga(restoO(30000));
                     continue;
@@ -1215,10 +1305,15 @@
                 let select = selectHoras();
                 const elegida = horaSeleccionada(select);
                 if (elegida && (aplicaciones > 0 || siguienteListo())) {
-                    return { select, opcion: elegida, texto: elegida.textContent.trim() };
+                    return empaquetarHora(select, elegida, elegida.textContent.trim());
                 }
-                if (aplicaciones > 0 && siguienteListo()) {
-                    return { select, opcion: elegida, texto: ultimaTexto };
+                // Siguiente listo pero la hora se borró: reaplicar, no dar por bueno.
+                if (aplicaciones > 0 && siguienteListo() && (ultimaTexto || ultimoValue)) {
+                    recordarHoraElegida(ultimaTexto, ultimoValue);
+                    if (await reafirmarHoraElegida()) {
+                        const actual = selectHoras();
+                        return empaquetarHora(actual, horaSeleccionada(actual), ultimaTexto);
+                    }
                 }
 
                 let opcion = select && Array.from(select.options).find(esOpcionHora);
@@ -1248,7 +1343,7 @@
 
                 aplicaciones++;
                 ultimaTexto = opcion.textContent.trim();
-                const valueGuardado = String(opcion.value || '').trim();
+                ultimoValue = String(opcion.value || '').trim();
                 log(`   aplicando hora ${ultimaTexto} (intento ${aplicaciones})`);
 
                 // Releer el select: el player puede haberlo recreado entre el
@@ -1259,6 +1354,7 @@
                     await dormir(400);
                     continue;
                 }
+                recordarHoraElegida(ultimaTexto, ultimoValue);
                 // No blur inmediato: a veces el player borra la selección al
                 // salir del campo antes de aceptar el change.
                 await dormir(300);
@@ -1268,23 +1364,26 @@
                     await dormir(200);
                     const actual = selectHoras();
                     const ok = horaSeleccionada(actual);
-                    if (ok) return { select: actual, opcion: ok, texto: ok.textContent.trim() };
+                    if (ok) return empaquetarHora(actual, ok, ok.textContent.trim());
                     // Aceptada por el player aunque haya rehecho el select.
                     if (
-                        valueGuardado &&
+                        ultimoValue &&
                         actual &&
-                        String(actual.value || '').trim() === valueGuardado
+                        String(actual.value || '').trim() === ultimoValue
                     ) {
                         const misma = Array.from(actual.options).find(
-                            (o) => String(o.value || '').trim() === valueGuardado,
+                            (o) => String(o.value || '').trim() === ultimoValue,
                         );
-                        return {
-                            select: actual,
-                            opcion: misma || null,
-                            texto: (misma && misma.textContent.trim()) || ultimaTexto,
-                        };
+                        return empaquetarHora(actual, misma, ultimaTexto);
                     }
-                    if (siguienteListo()) return { select: actual, opcion: null, texto: ultimaTexto };
+                    // Se borró durante la confirmación: reaplicar en vez de rendirse.
+                    if (await reafirmarHoraElegida()) {
+                        const fijo = selectHoras();
+                        const otra = horaSeleccionada(fijo);
+                        if (otra || siguienteListo()) {
+                            return empaquetarHora(fijo, otra, ultimaTexto);
+                        }
+                    }
                 }
                 const actual = selectHoras();
                 log(
@@ -1295,6 +1394,34 @@
             return { select: selectHoras(), opcion: null, aplicaciones };
         }
 
+        // Tras elegir: sostener la hora hasta que Siguiente esté listo (el player
+        // a veces la vacía un segundo después de aceptarla).
+        async function sostenerHoraElegida(resultado) {
+            if (!resultado || !(resultado.opcion || resultado.texto)) return false;
+            recordarHoraElegida(
+                resultado.texto,
+                (resultado.opcion && resultado.opcion.value) || (horaElegida && horaElegida.value) || '',
+            );
+            const limite = Date.now() + Math.min(20000, restoO(20000));
+            let avisos = 0;
+            while (Date.now() < limite) {
+                await reaccionarSiModalError();
+                if (estaCargando()) {
+                    await esperarSinCarga(restoO(10000));
+                    continue;
+                }
+                const ok = horaActualOk() || (await reafirmarHoraElegida());
+                if (ok && siguienteListo()) return true;
+                if (!ok && avisos < 3) {
+                    avisos++;
+                    log('   esperando a que la hora se mantenga en el select');
+                }
+                await dormir(250);
+            }
+            return horaActualOk() || (await reafirmarHoraElegida());
+        }
+
+        horaElegida = null;
         await abrirCalendario();
 
         // Se guardan los data-value y no los nodos porque el calendario se vuelve
@@ -1329,6 +1456,7 @@
             if (resultado.opcion || resultado.texto) {
                 const valorHora = resultado.opcion ? ` (value="${resultado.opcion.value}")` : '';
                 log(`   hora elegida: ${resultado.texto}${valorHora}`);
+                await sostenerHoraElegida(resultado);
                 // Título CUPOS ahora: el AHK busca la casilla mientras carga el captcha.
                 detener('¡CUPOS! Hay fecha y hora.', { sonido: false });
                 log('fecha y hora → título CUPOS');
@@ -1575,13 +1703,6 @@
         return null;
     }
 
-    // Texto de un ModalError que no sea el de máximo de citas (ese tiene su manejo).
-    function modalErrorInesperado() {
-        if (!pantallaOverlayVisible('ModalError') || hayModalMaxCitasDia()) return '';
-        const modal = document.querySelector('div[nombrepantalla="ModalError"]');
-        return ((modal && modal.innerText) || 'aviso de error').replace(/\s+/g, ' ').trim();
-    }
-
     // La página se trabó en un paso final: sin alarma, se enciende de nuevo el
     // monitor (detener() lo apagó en el captcha) y el ciclo recarga y reintenta;
     // el cliente sigue pendiente.
@@ -1601,13 +1722,9 @@
         let clics = 0;
         while (Date.now() < limite && !avanzo()) {
             recargarSiBloqueoSeguridad();
-            const aviso = modalErrorInesperado();
-            if (aviso) {
-                log(`   ModalError en ${desc}: ${aviso}`);
-                await cerrarModalError();
-                guardarEstado({ activo: true });
-                refrescarBoton();
-                throw new SinCupo(`en ${desc}: ${aviso}`);
+            await reaccionarSiModalError();
+            if (paso.sel && /PasoDos.*btnSiguiente/.test(paso.sel)) {
+                await reafirmarHoraElegida();
             }
             if (estaCargando()) {
                 await dormir(200);
@@ -1633,7 +1750,7 @@
             el.scrollIntoView({ block: 'center' });
             clicar(resolverObjetivo(el));
             let limiteClic = Date.now() + reintentoMs;
-            while (Date.now() < Math.min(limiteClic, limite) && !avanzo() && !modalErrorInesperado()) {
+            while (Date.now() < Math.min(limiteClic, limite) && !avanzo() && !pantallaOverlayVisible('ModalError')) {
                 if (estaCargando()) limiteClic = Math.max(limiteClic, Date.now() + 1000);
                 await dormir(200);
             }
@@ -1811,7 +1928,7 @@
             if (select && Array.from(select.options).some((o) => o.value !== '')) return true;
 
             recargarSiBloqueoSeguridad();
-            if (hayModalSinCupo()) await cerrarAvisoSinCupo();
+            await reaccionarSiModalError();
             await dormir(150);
         }
         return true;
@@ -1852,6 +1969,10 @@
             return true;
         }
 
+        if (paso.sel && /PasoDos.*btnSiguiente/.test(paso.sel)) {
+            await reafirmarHoraElegida();
+        }
+
         const el = await esperarElemento(paso.sel, paso.contiene, CONFIG.timeoutElementoMs);
         if (!el) {
             if (paso.opcional) {
@@ -1866,6 +1987,10 @@
             log('   ya estaba marcado, se omite');
             await estabilizarTrasPaso(paso);
             return true;
+        }
+
+        if (paso.sel && /PasoDos.*btnSiguiente/.test(paso.sel)) {
+            await reafirmarHoraElegida();
         }
 
         el.scrollIntoView({ block: 'center' });
@@ -1948,19 +2073,8 @@
         let limiteAyuda = 0;
         for (;;) {
             recargarSiBloqueoSeguridad();
-            const yaTieneCita = hayModalMaxCitasDia();
-            if (yaTieneCita) {
-                pararAlarma();
-                log(`   ModalError: ${yaTieneCita}`);
-                await marcarAgendado({
-                    sinFechaHora: true,
-                    motivo: normalizar(yaTieneCita).includes('abiertas') ? 'max_citas_abiertas' : 'max_citas_dia',
-                });
-                await cerrarModalError();
-                throw new ClienteYaAgendado(
-                    'cliente ya tenía el máximo de citas; marcado scheduled sin fecha/hora',
-                );
-            }
+            // Max citas / otros ModalError: Aceptar y (marcar o esperar intervalo).
+            await reaccionarSiModalError();
 
             const ok = primeroVisible(selOk);
             if (ok) {
@@ -1968,21 +2082,9 @@
                 await marcarAgendado();
                 clicar(resolverObjetivo(ok));
                 log('   cita confirmada (ModalInfoCita)');
-                await esperarSinCarga(8000, { lanzarSinCupo: false });
+                await esperarSinCarga(8000, { reaccionarModal: false });
                 await dormir(CONFIG.esperaTrasClicMs ?? 200);
                 return true;
-            }
-
-            // Otro aviso (p. ej. la agenda ya no está disponible): se cierra y el
-            // cliente sigue pendiente para el próximo reintento, sin alarma.
-            const aviso = modalErrorInesperado();
-            if (aviso) {
-                if (limiteAyuda) pararAlarma();
-                log(`   ModalError al agendar: ${aviso}`);
-                await cerrarModalError();
-                guardarEstado({ activo: true });
-                refrescarBoton();
-                throw new SinCupo(`al agendar: ${aviso}`);
             }
 
             if (!limiteAyuda) {
@@ -2005,22 +2107,6 @@
     }
 
     // ───────────────────────────── DETECCIÓN Y ALARMA ─────────────────────────
-
-    // La disponibilidad ya no se deduce de un aviso: se comprueba llegando a una
-    // fecha con horas libres. Este aviso solo sirve para distinguir "no hay nada"
-    // de "el script se rompió" cuando el flujo se queda en el PasoUno.
-    const avisoSinCupo = () => {
-        const aviso = normalizar(CONFIG.textoSinCupo);
-        if (!aviso) return pantallaOverlayVisible('ModalError');
-        // Preferir el texto del ModalError visible; fallback al body por si el
-        // overlay aún no flipó display pero el mensaje ya está en el DOM.
-        if (pantallaOverlayVisible('ModalError')) {
-            const modal = document.querySelector('div[nombrepantalla="ModalError"]');
-            const texto = normalizar(modal ? modal.innerText : '');
-            if (texto.includes(aviso)) return true;
-        }
-        return normalizar(document.body.innerText).includes(aviso);
-    };
 
     function detener(mensaje, opts = {}) {
         guardarEstado({ activo: false, ejecutando: false, ultimo: mensaje });
@@ -2144,15 +2230,13 @@
 
     // Cierra un ModalError residual sin lanzar SinCupo (evita abortar el soft-retry).
     async function descartarModalErrorSiHay() {
-        const sel = CONFIG.sinEspecialidades && CONFIG.sinEspecialidades.selAceptar;
-        if (!sel) return;
-        const aceptar =
-            Array.from(document.querySelectorAll(sel)).find(visibleEnPantalla) || document.querySelector(sel);
-        if (!aceptar || !hayModalSinCupo()) return;
+        if (!pantallaOverlayVisible('ModalError')) return;
+        if (hayModalBloqueoSeguridad()) {
+            recargarSiBloqueoSeguridad();
+            return;
+        }
         log('   cerrando modal residual');
-        clicar(resolverObjetivo(aceptar));
-        await dormir(CONFIG.pausaEntrePasosMs);
-        await esperarSinCarga(5000, { lanzarSinCupo: false });
+        await cerrarModalError();
     }
 
     // Prepara el DOM para reintentar sin recargar.

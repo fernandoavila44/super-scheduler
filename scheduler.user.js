@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Super Scheduler (sandbox)
 // @namespace    super-scheduler
-// @version      1.39-sandbox
+// @version      1.40-sandbox
 // @description  [SANDBOX] Appointment scheduling monitor
 // @match        https://agendamiento.dian.gov.co/*
 // @run-at       document-idle
@@ -51,6 +51,8 @@
             hoja: '',
             // Opciones del dropdown (deben coincidir con los nombres de las pestañas).
             ciudades: ['Bogota', 'Medellin', 'Cali', 'Bucaramanga', 'Manizales'],
+            // Colas opcionales (columna "cola" en la Sheet). Vacío en el panel = toda la hoja.
+            colas: ['A', 'B', 'C'],
             timeoutMs: 15000,
             // La lista guardada se usa sin consultar la Sheet si tiene menos de
             // esto; si es más vieja, se refresca en segundo plano sin frenar el ciclo.
@@ -310,6 +312,7 @@
     const CLAVE_CLIENTES = 'ssMonitorClientes';
     const CLAVE_SHEET_URL = 'ssSheetUrl';
     const CLAVE_HOJA = 'ssSheetHoja';
+    const CLAVE_COLA = 'ssSheetCola';
     const CLAVE_INTERVALO = 'ssIntervaloSegundos';
     // Últimas líneas de diagnóstico (consola + localStorage). No es un archivo.
     const CLAVE_LOG = 'ssMonitorLog';
@@ -324,6 +327,9 @@
     // Nombre de la pestaña / ciudad a la que apunta este PC.
     const nombreHoja = () => (CONFIG.sheet.hoja || localStorage.getItem(CLAVE_HOJA) || '').trim();
 
+    // Cola dentro de la ciudad (A/B/C). Vacío = toda la hoja (comportamiento anterior).
+    const nombreCola = () => (localStorage.getItem(CLAVE_COLA) || '').trim();
+
     // Periodicidad del reintento (dropdown del panel → localStorage).
     function intervaloSegundos() {
         const permitidos = CONFIG.intervalosSegundos || [5, 15, 30, 45, 60];
@@ -334,10 +340,12 @@
     }
     const intervaloMs = () => intervaloSegundos() * 1000;
 
-    // Caché por ciudad para no mezclar Bogotá con Medellín al cambiar de hoja.
+    // Caché por ciudad (+ cola) para no mezclar Bogotá A con Bogotá B ni con Medellín.
     const claveClientes = () => {
         const hoja = nombreHoja();
-        return hoja ? `${CLAVE_CLIENTES}:${hoja}` : CLAVE_CLIENTES;
+        if (!hoja) return CLAVE_CLIENTES;
+        const cola = nombreCola();
+        return cola ? `${CLAVE_CLIENTES}:${hoja}:${cola}` : `${CLAVE_CLIENTES}:${hoja}`;
     };
 
     // Cliente cuyo trámite se eligió en este ciclo. Su cédula se usa en el PasoTres
@@ -497,6 +505,8 @@
         if (!hoja) return Promise.reject(new Error('no hay ciudad/hoja configurada'));
         const sep = url.includes('?') ? '&' : '?';
         const qs = new URLSearchParams({ hoja });
+        const cola = nombreCola();
+        if (cola) qs.set('cola', cola);
         return gmRequest({ method: 'GET', url: url + sep + qs.toString() }).then((data) => {
             const arr = Array.isArray(data) ? data : data && data.clientes;
             if (!Array.isArray(arr)) throw new Error('la respuesta no trae un arreglo de clientes');
@@ -527,7 +537,11 @@
         });
     }
 
-    const claveSync = () => `ssSheetSyncAt:${nombreHoja()}`;
+    const claveSync = () => {
+        const hoja = nombreHoja();
+        const cola = nombreCola();
+        return cola ? `ssSheetSyncAt:${hoja}:${cola}` : `ssSheetSyncAt:${hoja}`;
+    };
     let refrescoEnCurso = false;
 
     function refrescarSheetEnFondo() {
@@ -580,13 +594,14 @@
             const remotos = await pedirClientesSheet();
             if (!remotos.length) {
                 if (cache.length) {
-                    log(`Hoja "${hoja}" vacía; se conserva la caché local`);
+                    log(`Hoja "${hoja}"${nombreCola() ? ` cola ${nombreCola()}` : ''} vacía; se conserva la caché local`);
                     return { clientes: cache, confiable: false };
                 }
                 return { clientes: [], confiable: true };
             }
             const pendientes = remotos.filter((c) => !c.scheduled).length;
-            log(`Hoja "${hoja}": ${remotos.length} cliente(s), ${pendientes} pendiente(s)`);
+            const etiquetaCola = nombreCola() ? ` cola ${nombreCola()}` : '';
+            log(`Hoja "${hoja}"${etiquetaCola}: ${remotos.length} cliente(s), ${pendientes} pendiente(s)`);
             localStorage.setItem(claveSync(), String(Date.now()));
             return {
                 clientes: fusionarClientes(remotos, { sheetManda: true }),
@@ -2509,7 +2524,46 @@
             const limpia = selectCiudad.value.trim();
             if (limpia) localStorage.setItem(CLAVE_HOJA, limpia);
             else localStorage.removeItem(CLAVE_HOJA);
-            pintar(limpia ? `Ciudad/hoja: ${limpia}` : 'Ciudad/hoja borrada.');
+            const cola = nombreCola();
+            pintar(
+                limpia
+                    ? `Ciudad/hoja: ${limpia}${cola ? ` · cola ${cola}` : ''}`
+                    : 'Ciudad/hoja borrada.',
+            );
+        };
+
+        const selectCola = document.createElement('select');
+        selectCola.style.cssText =
+            'cursor:pointer;padding:4px 8px;border:1px solid #666;border-radius:4px;background:#f3f3f3;max-width:90px';
+        selectCola.title = 'Cola dentro de la ciudad (columna cola en la Sheet). Vacío = toda la hoja.';
+        const opcionColaTodas = document.createElement('option');
+        opcionColaTodas.value = '';
+        opcionColaTodas.textContent = 'Cola…';
+        selectCola.appendChild(opcionColaTodas);
+        for (const cola of CONFIG.sheet.colas || ['A', 'B', 'C']) {
+            const op = document.createElement('option');
+            op.value = cola;
+            op.textContent = `Cola ${cola}`;
+            selectCola.appendChild(op);
+        }
+        selectCola.value = nombreCola();
+        if (nombreCola() && selectCola.value !== nombreCola()) {
+            const opExtra = document.createElement('option');
+            opExtra.value = nombreCola();
+            opExtra.textContent = `Cola ${nombreCola()}`;
+            selectCola.appendChild(opExtra);
+            selectCola.value = nombreCola();
+        }
+        selectCola.onchange = () => {
+            const limpia = selectCola.value.trim();
+            if (limpia) localStorage.setItem(CLAVE_COLA, limpia);
+            else localStorage.removeItem(CLAVE_COLA);
+            const hoja = nombreHoja();
+            pintar(
+                limpia
+                    ? `Cola ${limpia}${hoja ? ` · ${hoja}` : ''}`
+                    : `Cola: toda la hoja${hoja ? ` (${hoja})` : ''}`,
+            );
         };
 
         const selectIntervalo = document.createElement('select');
@@ -2561,7 +2615,7 @@
         };
 
         refrescarBoton();
-        botones.append(boton, botonExportar, botonSheet, selectCiudad, selectIntervalo);
+        botones.append(boton, botonExportar, botonSheet, selectCiudad, selectCola, selectIntervalo);
         $panel.append(titulo, $estado, botones);
         document.body.appendChild($panel);
     }

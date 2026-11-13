@@ -21,6 +21,9 @@ function listar_(datos) {
   var ctx = hojaConIndices_(datos && datos.hoja);
   if (ctx.error) return json_({ error: ctx.error, clientes: [] });
 
+  // Filtro opcional: ?cola=A → solo filas con esa cola. Sin parámetro = toda la hoja.
+  // Si la pestaña no tiene columna "cola", se ignora el filtro (compatibilidad).
+  var filtroCola = normalizarCola_(datos && datos.cola);
   var clientes = [];
   for (var r = 1; r < ctx.valores.length; r++) {
     var fila = ctx.valores[r];
@@ -29,6 +32,12 @@ function listar_(datos) {
     if (cedula === '' || cedula == null) continue;
     if (ciudadTramite === '' || ciudadTramite == null) continue;
 
+    var colaFila = '';
+    if (ctx.iCola >= 0) {
+      colaFila = textoCelda_(fila[ctx.iCola]);
+      if (filtroCola && normalizarCola_(colaFila) !== filtroCola) continue;
+    }
+
     var scheduled = ctx.iScheduled >= 0 ? esVerdadero_(fila[ctx.iScheduled]) : false;
     var date = ctx.iDate >= 0 ? textoCelda_(fila[ctx.iDate]) : '';
     var hour = ctx.iHour >= 0 ? textoCelda_(fila[ctx.iHour]) : '';
@@ -36,13 +45,18 @@ function listar_(datos) {
     clientes.push({
       cedula: String(cedula).replace(/\D/g, '') || String(cedula),
       ciudadTramite: String(ciudadTramite).trim(),
+      cola: colaFila,
       scheduled: scheduled,
       date: date,
       hour: hour,
     });
   }
 
-  return json_({ clientes: clientes, hoja: ctx.nombreHoja });
+  return json_({
+    clientes: clientes,
+    hoja: ctx.nombreHoja,
+    cola: filtroCola || null,
+  });
 }
 
 function schedule_(datos) {
@@ -144,7 +158,15 @@ function hojaConIndices_(nombreHoja) {
     iHour: headers.indexOf('hour'),
     iName: headers.indexOf('name'),
     iEmail: headers.indexOf('email'),
+    iCola: headers.indexOf('cola'),
   };
+}
+
+// Comparación de cola sin mayúsculas ni espacios (A == a == " A ").
+function normalizarCola_(v) {
+  return String(v == null ? '' : v)
+    .trim()
+    .toLowerCase();
 }
 
 function esVerdadero_(v) {

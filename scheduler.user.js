@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Super Scheduler
 // @namespace    super-scheduler
-// @version      1.40
+// @version      1.41
 // @description  Appointment scheduling monitor
 // @match        https://agendamiento.dian.gov.co/*
 // @run-at       document-idle
@@ -106,11 +106,13 @@
             {
                 sel: 'div[nombrecontrol="btnSolicitarCita"]',
                 desc: 'Solicitar cita',
-                esperaHasta: 'div.boton.btnTipoPersona[llave="1"]',
+                esperaHasta:
+                    'div.boton.btnTipoPersona[llave="1"], div.boton.btnTipoPersona[llave="2"]',
                 espera: 200,
             },
+            // Natural (1) o jurídica (2) según columna tipoPersona del primer pendiente.
             {
-                sel: 'div.boton.btnTipoPersona[llave="1"]',
+                accion: 'tipoPersona',
                 desc: 'Tipo de persona',
                 esperaHasta: 'div.boton.btnTipoAtencion[llave="2"]',
                 espera: 200,
@@ -354,6 +356,17 @@
     // Hora aceptada en PasoDos: el player a veces vacía el select después;
     // se reaplica hasta pulsar Siguiente.
     let horaElegida = null;
+    // '1' natural / '2' jurídica elegida en este ciclo (antes del trámite).
+    let tipoPersonaCiclo = '1';
+
+    // Columna tipoPersona: 1 = natural, 2 = jurídica. Vacío o ausente → 1.
+    function normalizarTipoPersonaCliente(v) {
+        const s = String(v == null ? '' : v)
+            .trim()
+            .toLowerCase();
+        if (s === '2' || s.includes('jurid') || s.includes('juríd')) return '2';
+        return '1';
+    }
 
     const leerEstado = () => {
         try {
@@ -411,9 +424,11 @@
         const scheduled = parseScheduled(c.scheduled);
         const fecha = (c.date || (c.cita && c.cita.fecha) || '').toString().trim();
         const hora = (c.hour || (c.cita && c.cita.hora) || '').toString().trim();
+        const tipoPersona = normalizarTipoPersonaCliente(c.tipoPersona);
         const entrada = {
             cedula: /^\d+$/.test(cedula) ? Number(cedula) : c.cedula,
             ciudadTramite,
+            tipoPersona,
             scheduled,
         };
         if (fecha || hora || (c.cita && c.cita.tramite)) {
@@ -1781,6 +1796,26 @@
         }
     }
 
+    // El player pide tipo de persona antes del trámite. Se toma el del primer
+    // pendiente (columna tipoPersona); en el trámite solo se prueban del mismo tipo.
+    async function elegirTipoPersona() {
+        const pendientes = cargarClientes().filter((c) => !c.scheduled);
+        const tipo = pendientes.length
+            ? normalizarTipoPersonaCliente(pendientes[0].tipoPersona)
+            : '1';
+        tipoPersonaCiclo = tipo;
+        const sel = `div.boton.btnTipoPersona[llave="${tipo}"]`;
+        const el = await esperarElemento(sel, null, CONFIG.timeoutElementoMs);
+        if (!el) throw new Error(`No apareció tipo de persona llave=${tipo}`);
+        el.scrollIntoView({ block: 'center' });
+        clicar(resolverObjetivo(el));
+        log(
+            `   tipo persona: ${tipo === '2' ? 'jurídica' : 'natural'} (llave=${tipo})` +
+                (pendientes[0] ? ` ← ${pendientes[0].cedula}` : ''),
+        );
+        return true;
+    }
+
     // La lista de trámites cambia en cada ciclo. Se recorre la cola y se queda con
     // el primer pendiente cuya ciudadTramite esté entre las opciones.
     async function elegirTramite() {
@@ -1791,8 +1826,17 @@
         }
         select.scrollIntoView({ block: 'center' });
 
-        const pendientes = cargarClientes().filter((c) => !c.scheduled);
-        if (!pendientes.length) throw new FinCola('Todos los clientes ya están agendados');
+        const tipoCiclo = tipoPersonaCiclo || '1';
+        const pendientes = cargarClientes().filter(
+            (c) => !c.scheduled && normalizarTipoPersonaCliente(c.tipoPersona) === tipoCiclo,
+        );
+        if (!pendientes.length) {
+            const otros = cargarClientes().filter((c) => !c.scheduled);
+            if (!otros.length) throw new FinCola('Todos los clientes ya están agendados');
+            throw new SinCupo(
+                `sin pendientes tipoPersona=${tipoCiclo} (hay ${otros.length} de otro tipo)`,
+            );
+        }
 
         const limite = Date.now() + CONFIG.timeoutElementoMs;
         let opciones = Array.from(select.options).filter((o) => o.value !== '');
@@ -1943,6 +1987,12 @@
     async function ejecutarPaso(paso) {
         if (paso.accion === 'sinEspecialidades') {
             await revisarSinEspecialidades();
+            return true;
+        }
+
+        if (paso.accion === 'tipoPersona') {
+            await elegirTipoPersona();
+            await estabilizarTrasPaso(paso);
             return true;
         }
 
@@ -2302,6 +2352,7 @@
         let fueSinCupo = false;
         try {
             let pasos = CONFIG.pasos;
+            let softDesdeCategoria = false;
             if (soft) {
                 const desde = await prepararReintentoSuave({ trasAgendar: !!opts.trasAgendar });
                 if (!desde) {
@@ -2309,6 +2360,7 @@
                     return;
                 }
                 if (desde === 'categoria') {
+                    softDesdeCategoria = true;
                     pasos = CONFIG.pasos.slice(indicePasoCategoria());
                 } else {
                     pasos = CONFIG.pasos;
@@ -2324,6 +2376,18 @@
                 // o solo con agendados dudosos, no apagar el monitor como "fin de cola".
                 if (confiable) throw new FinCola('Todos los clientes ya están agendados');
                 throw new Error('sin pendientes en caché (la Sheet no confirmó el estado)');
+            }
+
+            // Soft desde categoría no puede cambiar natural↔jurídica: hace falta
+            // volver a Solicitar cita. Recarga y el ciclo completo elige el tipo.
+            if (softDesdeCategoria) {
+                const tipoNecesario = normalizarTipoPersonaCliente(pendientes[0].tipoPersona);
+                if (tipoNecesario !== (tipoPersonaCiclo || '1')) {
+                    recargarInicio(
+                        `tipoPersona ${tipoPersonaCiclo}→${tipoNecesario}: recarga para elegir de nuevo`,
+                    );
+                    return;
+                }
             }
 
             // Tras el captcha la cita ya está a la vista: esos pasos insisten y

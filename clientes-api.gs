@@ -41,11 +41,20 @@ function listar_(datos) {
     var scheduled = ctx.iScheduled >= 0 ? esVerdadero_(fila[ctx.iScheduled]) : false;
     var date = ctx.iDate >= 0 ? textoCelda_(fila[ctx.iDate]) : '';
     var hour = ctx.iHour >= 0 ? textoCelda_(fila[ctx.iHour]) : '';
+    // 1 = natural, 2 = jurídica. Sin columna o vacío → 1 (compatibilidad).
+    var tipoPersona = '1';
+    if (ctx.iTipoPersona >= 0) {
+      var rawTipo = textoCelda_(fila[ctx.iTipoPersona]);
+      if (rawTipo === '2') tipoPersona = '2';
+      else if (rawTipo === '1') tipoPersona = '1';
+      else if (rawTipo) tipoPersona = normalizarTipoPersona_(rawTipo);
+    }
 
     clientes.push({
       cedula: String(cedula).replace(/\D/g, '') || String(cedula),
       ciudadTramite: String(ciudadTramite).trim(),
       cola: colaFila,
+      tipoPersona: tipoPersona,
       scheduled: scheduled,
       date: date,
       hour: hour,
@@ -159,6 +168,7 @@ function hojaConIndices_(nombreHoja) {
     iName: headers.indexOf('name'),
     iEmail: headers.indexOf('email'),
     iCola: headers.indexOf('cola'),
+    iTipoPersona: headers.indexOf('tipopersona'),
   };
 }
 
@@ -167,6 +177,15 @@ function normalizarCola_(v) {
   return String(v == null ? '' : v)
     .trim()
     .toLowerCase();
+}
+
+// Acepta 1/2 o textos típicos; cualquier otra cosa → 1 (natural).
+function normalizarTipoPersona_(v) {
+  var s = String(v == null ? '' : v)
+    .trim()
+    .toLowerCase();
+  if (s === '2' || s.indexOf('jurid') >= 0 || s.indexOf('juríd') >= 0) return '2';
+  return '1';
 }
 
 function esVerdadero_(v) {

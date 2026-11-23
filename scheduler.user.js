@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Super Scheduler
 // @namespace    super-scheduler
-// @version      1.41
+// @version      1.42
 // @description  Appointment scheduling monitor
 // @match        https://agendamiento.dian.gov.co/*
 // @run-at       document-idle
@@ -68,7 +68,7 @@
         // Tiempo entre ciclos cuando no hay cupo (o tras un fallo recuperable).
         // El valor activo se elige en el dropdown del panel y se guarda en localStorage.
         intervaloSegundos: 30,
-        intervalosSegundos: [5, 15, 30, 45, 60],
+        intervalosSegundos: [5, 10, 15, 30, 45, 60],
 
         // Tras agendar, si quedan clientes, espera esto y vuelve a empezar.
         segundosAntesDelSiguienteCliente: 0,
@@ -334,7 +334,7 @@
 
     // Periodicidad del reintento (dropdown del panel → localStorage).
     function intervaloSegundos() {
-        const permitidos = CONFIG.intervalosSegundos || [5, 15, 30, 45, 60];
+        const permitidos = CONFIG.intervalosSegundos || [5, 10, 15, 30, 45, 60];
         const guardado = Number(localStorage.getItem(CLAVE_INTERVALO));
         if (permitidos.includes(guardado)) return guardado;
         const def = Number(CONFIG.intervaloSegundos) || 30;
@@ -2634,7 +2634,7 @@
         selectIntervalo.style.cssText =
             'cursor:pointer;padding:4px 8px;border:1px solid #666;border-radius:4px;background:#f3f3f3;max-width:100px';
         selectIntervalo.title = 'Periodicidad entre reintentos';
-        for (const segs of CONFIG.intervalosSegundos || [5, 15, 30, 45, 60]) {
+        for (const segs of CONFIG.intervalosSegundos || [5, 10, 15, 30, 45, 60]) {
             const op = document.createElement('option');
             op.value = String(segs);
             op.textContent = `${segs} s`;

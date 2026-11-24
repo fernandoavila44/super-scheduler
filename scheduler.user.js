@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Super Scheduler (sandbox)
 // @namespace    super-scheduler
-// @version      1.47-sandbox
+// @version      1.48-sandbox
 // @description  [SANDBOX] Appointment scheduling monitor
 // @match        https://agendamiento.dian.gov.co/*
 // @run-at       document-idle
@@ -2112,91 +2112,84 @@
         return data;
     }
 
+    // Igual que monitor-dian: $.ajax en la página (no fetch). El endpoint rechaza
+    // fetch "limpio" con 403 CSR: Invalid request; acepta el body estilo player.
     async function postValidadorValidar(respuestaBase) {
         const cfg = CONFIG.validador || {};
         const configuracion = asegurarConfigValidador();
         if (!configuracion) throw new Error('sin blob del Validador (aún no capturado)');
 
         const win = vistaPagina();
-        const url = cfg.url || '/Player.aspx/ValidadorValidar';
-        const body = JSON.stringify({
-            nombre: cfg.nombre || 'ValidadorDatos.CitasWeb',
-            configuracion,
-            respuestaBase,
-        });
+        const jq = win.jQuery || win.$;
+        if (!jq || typeof jq.ajax !== 'function') {
+            throw new Error('jQuery no disponible en la página');
+        }
 
-        const ctrl =
-            typeof AbortController !== 'undefined' ? new AbortController() : null;
-        const t = setTimeout(() => {
-            try {
-                if (ctrl) ctrl.abort();
-            } catch (_) {
-                /* ignore */
-            }
-        }, cfg.timeoutMs || 8000);
+        const nombre = cfg.nombre || 'ValidadorDatos.CitasWeb';
+        const url = (cfg.url || 'Player.aspx/ValidadorValidar').replace(/^\//, '');
+        // Formato que usa el player / monitor-dian (no JSON estricto en las claves top).
+        const data =
+            "{nombre:'" +
+            nombre +
+            "',configuracion:" +
+            JSON.stringify(configuracion) +
+            ', respuestaBase: ' +
+            JSON.stringify(respuestaBase) +
+            '}';
 
-        let res;
-        try {
-            res = await win.fetch(url, {
-                method: 'POST',
-                credentials: 'same-origin',
-                headers: {
-                    'Content-Type': 'application/json; charset=utf-8',
+        const timeoutMs = cfg.timeoutMs || 8000;
+        return await new Promise((resolve, reject) => {
+            let listo = false;
+            const timer = setTimeout(() => {
+                if (listo) return;
+                listo = true;
+                reject(new Error('Validador timeout'));
+            }, timeoutMs);
+
+            jq.ajax({
+                url,
+                type: 'POST',
+                data,
+                contentType: 'application/json; charset=UTF-8',
+                dataType: 'json',
+                success: (d) => {
+                    if (listo) return;
+                    listo = true;
+                    clearTimeout(timer);
+                    try {
+                        const parsed = parseRespuestaValidador(d);
+                        if (!parsed) reject(new Error('Validador: respuesta vacía'));
+                        else resolve(parsed);
+                    } catch (e) {
+                        reject(e);
+                    }
                 },
-                body,
-                signal: ctrl ? ctrl.signal : undefined,
+                error: (xhr) => {
+                    if (listo) return;
+                    listo = true;
+                    clearTimeout(timer);
+                    const status = xhr && xhr.status;
+                    const body = (xhr && xhr.responseText) || '';
+                    reject(
+                        new Error(
+                            'Validador HTTP ' +
+                                status +
+                                (body ? ' ' + String(body).slice(0, 80) : ''),
+                        ),
+                    );
+                },
             });
-        } finally {
-            clearTimeout(t);
-        }
-        if (!res.ok) throw new Error('Validador HTTP ' + res.status);
-        const text = await res.text();
-        let raw;
-        try {
-            raw = JSON.parse(text);
-        } catch (e) {
-            throw new Error('Validador no devolvió JSON');
-        }
-        const parsed = parseRespuestaValidador(raw);
-        if (!parsed) throw new Error('Validador: respuesta vacía');
-        return parsed;
+        });
     }
 
-    // 4 POST: tipos cliente → especialidad → categorías → colas/trámites.
-    // Devuelve { sinCupo, colas } o lanza si la red/config falla (el caller hace fallback).
+    // Un POST a colas (como monitor-dian). Sin cadena de 4 pasos.
+    // Devuelve { sinCupo, colas } o lanza si la red/config falla (fallback a clics).
     async function sondearColasPorValidador(tipoCliente) {
         const cfg = CONFIG.validador || {};
         const recurso = cfg.recurso || 'CitasDIAN';
         const tipo = String(tipoCliente || '1');
         const tipoVirt = String(cfg.tipoEspecialidadVirtual || '2');
         const codCat = String(cfg.categoriaCodigo || '13');
-
-        const r1 = await postValidadorValidar({
-            Fuente: 'Validador',
-            Encontrado: false,
-            DetalleAdicional: 'manejadorEncontroTiposCliente',
-            ObjetosEncontrados: [],
-            Recurso: recurso,
-        });
-        if (!r1.Encontrado) throw new Error('Validador: sin tipos de cliente');
-
-        const r2 = await postValidadorValidar({
-            Fuente: 'Validador',
-            Encontrado: false,
-            DetalleAdicional: 'manejadorEncontroTiposEspecialidad',
-            ObjetosEncontrados: [JSON.stringify(plantillaCitaValidador(tipo, 0))],
-            Recurso: recurso,
-        });
-        if (!r2.Encontrado) throw new Error('Validador: sin tipos de especialidad');
-
-        const r3 = await postValidadorValidar({
-            Fuente: 'Validador',
-            Encontrado: false,
-            DetalleAdicional: 'manejadorEncontroCategoria',
-            ObjetosEncontrados: [tipoVirt],
-            Recurso: recurso,
-        });
-        if (!r3.Encontrado) throw new Error('Validador: sin categorías');
 
         const r4 = await postValidadorValidar({
             Fuente: 'Validador',

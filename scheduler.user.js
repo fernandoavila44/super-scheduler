@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Super Scheduler (sandbox)
 // @namespace    super-scheduler
-// @version      1.48-sandbox
+// @version      1.49-sandbox
 // @description  [SANDBOX] Appointment scheduling monitor
 // @match        https://agendamiento.dian.gov.co/*
 // @run-at       document-idle
@@ -35,7 +35,9 @@
         // Tras softMaxSeguidos fallos seguidos, o si no se puede volver a
         // Categoría, se recarga la página (estado del player limpio).
         reintento: {
-            softMaxSeguidos: 8,
+            // Soft retries antes de hard refresh. No hay tope técnico; 20–50 es
+            // razonable. Muy alto = el player puede degradarse sin limpiar DOM.
+            softMaxSeguidos: 20,
             selCategoria:
                 'div.boton.btnCategoria[llave="63071985-f5bd-43fe-beed-38f64c97371b"]',
             selAnterior: 'div[tipo="Control"][nombre="btnAnterior"]',

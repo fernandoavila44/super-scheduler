@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Super Scheduler (sandbox)
 // @namespace    super-scheduler
-// @version      1.51-sandbox
+// @version      1.50-sandbox
 // @description  [SANDBOX] Appointment scheduling monitor
 // @match        https://agendamiento.dian.gov.co/*
 // @run-at       document-idle
@@ -204,8 +204,6 @@
         ],
 
         // Selectores del par calendario + horas del PasoDos.
-        // Premisa actual DIAN: suele haber solo el próximo día hábil y ventanas
-        // tempranas (8:00–9:30). Preferencias acortan el paso 2.
         fechaYHora: {
             selBoton: 'div[tipo="Control"][pantalla="PasoDos"][nombre="btnFecha"]',
             // El calendario vive siempre en el DOM; su tabla visible es la señal
@@ -221,12 +219,6 @@
             selHoras: 'div[nombrecontrol="Horas"] select.customSelect',
             // Solo se muestra habilitado cuando el player aceptó la hora.
             selSiguiente: 'div[tipo="Control"][pantalla="PasoDos"][nombre="btnSiguiente"]',
-            // Ir al día habilitado más cercano; si falla, probar hasta maxDiasProbar.
-            preferirPrimerDia: true,
-            maxDiasProbar: 2,
-            // Orden de preferencia (texto flexible: "8:00", "8:00 AM", value ISO…).
-            // Si ninguna coincide, se toma la hora más temprana disponible.
-            preferenciaHoras: ['8:00', '8:30', '9:00', '9:30'],
             // Tope del paso entero: la página lenta puede tardar minutos en pintar
             // días u horas; no se declara "sin cupo" antes de agotar esto.
             timeoutPasoMs: 5 * 60 * 1000,
@@ -239,11 +231,9 @@
             timeoutHorasMs: 5 * 60 * 1000,
             // Tras elegir la hora, cuánto esperar la confirmación del player
             // (hora seleccionada o Siguiente habilitado) antes de reintentar.
-            confirmarHoraMs: 10000,
+            confirmarHoraMs: 15000,
             // Veces que se vuelve a aplicar la hora si el player rehízo el select.
             intentosHora: 8,
-            // Pausa corta tras clic de día (además de esperarSinCarga).
-            esperaTrasClicDiaMs: 100,
         },
 
         captcha: {
@@ -1117,72 +1107,6 @@
         return !o.disabled;
     }
 
-    // Minutos desde medianoche; null si no se puede leer.
-    function minutosDeTextoHora(texto) {
-        const t = String(texto || '').replace(/\s+/g, ' ').trim();
-        const m = t.match(/(\d{1,2})\s*:\s*(\d{2})(?::\d{2})?\s*(a\.?\s*m\.?|p\.?\s*m\.?|am|pm)?/i);
-        if (!m) return null;
-        let h = Number(m[1]);
-        const min = Number(m[2]);
-        if (!Number.isFinite(h) || !Number.isFinite(min)) return null;
-        const ap = String(m[3] || '')
-            .replace(/\./g, '')
-            .replace(/\s+/g, '')
-            .toLowerCase();
-        if (ap === 'pm' && h < 12) h += 12;
-        if (ap === 'am' && h === 12) h = 0;
-        return h * 60 + min;
-    }
-
-    function minutosDeOpcionHora(o) {
-        if (!o) return null;
-        const texto = (o.textContent || '').replace(/\s+/g, ' ').trim();
-        const value = String(o.value || '').trim();
-        return minutosDeTextoHora(texto) ?? minutosDeTextoHora(value);
-    }
-
-    function opcionCoincidePreferencia(o, pref) {
-        if (!o || pref == null || pref === '') return false;
-        const prefMin = minutosDeTextoHora(pref);
-        const opMin = minutosDeOpcionHora(o);
-        if (prefMin != null && opMin != null) return prefMin === opMin;
-        const texto = (o.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
-        const value = String(o.value || '').trim().toLowerCase();
-        const p = String(pref).replace(/\s+/g, ' ').trim().toLowerCase();
-        return texto.indexOf(p) >= 0 || value.indexOf(p) >= 0;
-    }
-
-    // Orden: preferenciaHoras → resto por hora ascendente. Omite ya intentadas (value/texto).
-    function listarOpcionesHoraPreferidas(select, preferencias, omitidas) {
-        if (!select) return [];
-        const prefs = Array.isArray(preferencias) ? preferencias : [];
-        const omit = omitidas instanceof Set ? omitidas : new Set();
-        const todas = Array.from(select.options).filter(esOpcionHora);
-        const clave = (o) =>
-            String(o.value || '').trim() || (o.textContent || '').replace(/\s+/g, ' ').trim();
-        const libres = todas.filter((o) => !omit.has(clave(o)));
-        const ordenadas = [];
-        const usadas = new Set();
-        for (const pref of prefs) {
-            const hit = libres.find((o) => opcionCoincidePreferencia(o, pref) && !usadas.has(clave(o)));
-            if (hit) {
-                ordenadas.push(hit);
-                usadas.add(clave(hit));
-            }
-        }
-        const resto = libres
-            .filter((o) => !usadas.has(clave(o)))
-            .sort((a, b) => {
-                const ma = minutosDeOpcionHora(a);
-                const mb = minutosDeOpcionHora(b);
-                if (ma == null && mb == null) return 0;
-                if (ma == null) return 1;
-                if (mb == null) return -1;
-                return ma - mb;
-            });
-        return ordenadas.concat(resto);
-    }
-
     function resumenOpcionesHoras(select) {
         if (!select) return 'sin select';
         const opts = Array.from(select.options);
@@ -1248,8 +1172,8 @@
     }
 
     // Las horas que ofrece la página dependen del día elegido, así que un día
-    // habilitado en el calendario no garantiza horas libres. Se prioriza el día
-    // más cercano y las franjas de preferenciaHoras (p. ej. 8:00–9:30).
+    // habilitado en el calendario no garantiza horas libres. Se recorren los días
+    // habilitados y se toma el primero que sí tenga horas.
     async function elegirFechaYHora() {
         const {
             selBoton,
@@ -1258,16 +1182,12 @@
             selMesSiguiente,
             selHoras,
             selSiguiente,
-            preferirPrimerDia,
-            maxDiasProbar,
-            preferenciaHoras,
             timeoutPasoMs,
             timeoutCalendarioMs,
             timeoutDiasMs,
             timeoutHorasMs,
             confirmarHoraMs,
             intentosHora,
-            esperaTrasClicDiaMs,
         } = CONFIG.fechaYHora;
 
         const limitePaso = Date.now() + (timeoutPasoMs || 5 * 60 * 1000);
@@ -1408,11 +1328,10 @@
         }
 
         // Re-consulta el <select> en cada sondeo (el player puede recrearlo).
-        // Preferencia 8:00→9:30; si no confirma, prueba la siguiente (slot ocupado).
+        // No se aborta a las 3 aplicaciones: si las horas se ven, se insiste
+        // hasta el tope del paso.
         async function esperarYElegirHora() {
             const limite = Date.now() + restoO(timeoutHorasMs);
-            const prefs = preferenciaHoras || ['8:00', '8:30', '9:00', '9:30'];
-            const omitidas = new Set();
             let aplicaciones = 0;
             let ultimaTexto = '';
             let ultimoValue = '';
@@ -1440,20 +1359,18 @@
                     }
                 }
 
-                let candidatas = listarOpcionesHoraPreferidas(select, prefs, omitidas);
-                let opcion = candidatas[0] || null;
+                let opcion = select && Array.from(select.options).find(esOpcionHora);
                 // El customSelect a menudo nace vacío: las horas llegan al abrirlo.
-                if (select && !opcion && Date.now() - ultimoClic > 800 && clics < 12) {
+                if (select && !opcion && Date.now() - ultimoClic > 1200 && clics < 12) {
                     select.scrollIntoView({ block: 'center' });
                     select.focus();
                     clicar(select);
                     clics++;
                     ultimoClic = Date.now();
                     log(`   abriendo selector de horas (clic ${clics})`);
-                    await dormir(350);
+                    await dormir(700);
                     select = selectHoras();
-                    candidatas = listarOpcionesHoraPreferidas(select, prefs, omitidas);
-                    opcion = candidatas[0] || null;
+                    opcion = select && Array.from(select.options).find(esOpcionHora);
                 }
                 if (!opcion) {
                     if (Date.now() - aviso > 15000) {
@@ -1463,53 +1380,34 @@
                                 `[${resumenOpcionesHoras(select)}]`,
                         );
                     }
-                    await dormir(250);
+                    await dormir(400);
                     continue;
                 }
 
                 aplicaciones++;
                 ultimaTexto = opcion.textContent.trim();
                 ultimoValue = String(opcion.value || '').trim();
-                const claveOmit =
-                    ultimoValue || (ultimaTexto || '').replace(/\s+/g, ' ').trim();
-                log(
-                    `   aplicando hora ${ultimaTexto} (intento ${aplicaciones}` +
-                        (candidatas.length > 1 ? `; ${candidatas.length} candidatas` : '') +
-                        ')',
-                );
+                log(`   aplicando hora ${ultimaTexto} (intento ${aplicaciones})`);
 
                 // Releer el select: el player puede haberlo recreado entre el
                 // clic de abrir y ahora; aplicar sobre el nodo viejo no marca nada.
                 select = selectHoras();
-                const opcionViva =
-                    (select &&
-                        Array.from(select.options).find(
-                            (o) =>
-                                (ultimoValue && String(o.value || '').trim() === ultimoValue) ||
-                                (o.textContent || '').replace(/\s+/g, ' ').trim() === ultimaTexto,
-                        )) ||
-                    opcion;
-                if (!select || !aplicarOpcionSelect(select, opcionViva)) {
+                if (!select || !aplicarOpcionSelect(select, opcion)) {
                     log('   no se pudo aplicar la hora en el select actual');
-                    if (claveOmit) omitidas.add(claveOmit);
-                    await dormir(250);
+                    await dormir(400);
                     continue;
                 }
                 recordarHoraElegida(ultimaTexto, ultimoValue);
                 // No blur inmediato: a veces el player borra la selección al
                 // salir del campo antes de aceptar el change.
-                await dormir(200);
+                await dormir(300);
 
-                const limiteConfirmar = Math.min(limite, Date.now() + (confirmarHoraMs || 10000));
-                let confirmada = false;
+                const limiteConfirmar = Math.min(limite, Date.now() + confirmarHoraMs);
                 while (Date.now() < limiteConfirmar) {
-                    await dormir(150);
+                    await dormir(200);
                     const actual = selectHoras();
                     const ok = horaSeleccionada(actual);
-                    if (ok) {
-                        confirmada = true;
-                        return empaquetarHora(actual, ok, ok.textContent.trim());
-                    }
+                    if (ok) return empaquetarHora(actual, ok, ok.textContent.trim());
                     // Aceptada por el player aunque haya rehecho el select.
                     if (
                         ultimoValue &&
@@ -1519,7 +1417,6 @@
                         const misma = Array.from(actual.options).find(
                             (o) => String(o.value || '').trim() === ultimoValue,
                         );
-                        confirmada = true;
                         return empaquetarHora(actual, misma, ultimaTexto);
                     }
                     // Se borró durante la confirmación: reaplicar en vez de rendirse.
@@ -1527,7 +1424,6 @@
                         const fijo = selectHoras();
                         const otra = horaSeleccionada(fijo);
                         if (otra || siguienteListo()) {
-                            confirmada = true;
                             return empaquetarHora(fijo, otra, ultimaTexto);
                         }
                     }
@@ -1535,12 +1431,8 @@
                 const actual = selectHoras();
                 log(
                     `   la hora no se confirmó (index=${actual ? actual.selectedIndex : '-'}, ` +
-                        `value="${actual ? actual.value : ''}")` +
-                        (claveOmit ? '; probando siguiente preferida' : ''),
+                        `value="${actual ? actual.value : ''}")`,
                 );
-                if (claveOmit) omitidas.add(claveOmit);
-                // Si no confirmó (p. ej. cupo se ocupó), no insistir en la misma.
-                if (!confirmada) continue;
             }
             return { select: selectHoras(), opcion: null, aplicaciones };
         }
@@ -1568,20 +1460,10 @@
 
         // Se guardan los data-value y no los nodos porque el calendario se vuelve
         // a dibujar cada vez que se abre y las referencias quedarían obsoletas.
-        let dias = await esperarDiasHabilitados();
+        const dias = await esperarDiasHabilitados();
 
         if (!dias.length) throw new SinCupo('el calendario no tiene días habilitados');
-        // Premisa: solo el próximo hábil suele tener cupo → ir directo a ese.
-        const topeDias =
-            preferirPrimerDia === false
-                ? dias.length
-                : Math.max(1, Number(maxDiasProbar) || 2);
-        if (dias.length > topeDias) {
-            log(`   días habilitados: ${dias.length}; priorizando los ${topeDias} más cercanos`);
-            dias = dias.slice(0, topeDias);
-        } else {
-            log(`   días habilitados: ${dias.length}`);
-        }
+        log(`   días habilitados: ${dias.length}`);
 
         let ultimoDetalle = '';
         for (const valor of dias) {
@@ -1599,14 +1481,10 @@
             log(`   probando ${dia.title || valor}`);
             clicar(dia);
             await esperarSinCarga(restoO(30000));
-            await dormir(
-                esperaTrasClicDiaMs != null
-                    ? esperaTrasClicDiaMs
-                    : CONFIG.esperaTrasClicMs ?? 100,
-            );
+            await dormir(CONFIG.esperaTrasClicMs ?? 200);
             // Dar tiempo a que el combo de horas exista antes de abrirlo.
-            const limiteSelect = Date.now() + Math.min(5000, restoO(5000));
-            while (Date.now() < limiteSelect && !selectHoras()) await dormir(120);
+            const limiteSelect = Date.now() + Math.min(8000, restoO(8000));
+            while (Date.now() < limiteSelect && !selectHoras()) await dormir(200);
 
             const resultado = await esperarYElegirHora();
             if (resultado.opcion || resultado.texto) {

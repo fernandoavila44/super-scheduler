@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Super Scheduler
 // @namespace    super-scheduler
-// @version      1.45
+// @version      1.46
 // @description  Appointment scheduling monitor
 // @match        https://agendamiento.dian.gov.co/*
 // @run-at       document-idle
@@ -43,8 +43,8 @@
         },
 
         // Sondeo rápido Inicio→colas vía ValidadorValidar (sin esperar el DOM).
-        // El blob ConfiguracionServicioRestEncriptado NO se arma a mano: se captura
-        // del player en la pestaña abierta. Si falla, se usa el camino por clics.
+        // Blob: pegado en el panel (localStorage) o capturado por el hook del player.
+        // Si no hay blob, se usa el camino por clics.
         validador: {
             activo: true,
             url: '/Player.aspx/ValidadorValidar',
@@ -55,7 +55,6 @@
             categoriaCodigo: '13',
             // Videoatención / Virtual.
             tipoEspecialidadVirtual: '2',
-            // Solo se usa si el blob ya se capturó en un ciclo previo (sin seed-click).
             timeoutMs: 8000,
         },
 
@@ -309,6 +308,8 @@
     const CLAVE_HOJA = 'ssSheetHoja';
     const CLAVE_COLA = 'ssSheetCola';
     const CLAVE_INTERVALO = 'ssIntervaloSegundos';
+    // Blob Validador (JSON de configuracion). Solo en este navegador.
+    const CLAVE_VALIDADOR_BLOB = 'ssValidadorBlob';
     // Últimas líneas de diagnóstico (consola + localStorage). No es un archivo.
     const CLAVE_LOG = 'ssMonitorLog';
 
@@ -1799,9 +1800,81 @@
     }
 
     // ─── ValidadorValidar (sondeo rápido de colas) ───────────────────────────
-    // El blob encriptado lo emite el player; cada PC/sesión lo captura solo.
+    // Blob: panel (pegado) o hook del player. Se guarda en localStorage por PC.
     let configValidador = null;
+    let origenBlobValidador = ''; // 'pegado' | 'hook' | ''
     let hookValidadorListo = false;
+    let refrescarEstadoBlob = () => {};
+
+    // Acepta el objeto configuracion o el body completo del POST.
+    function normalizarConfigValidador(data) {
+        if (!data || typeof data !== 'object') return null;
+        if (data.configuracion && typeof data.configuracion === 'object') {
+            data = data.configuracion;
+        } else if (typeof data.configuracion === 'string') {
+            try {
+                data = JSON.parse(data.configuracion);
+            } catch (_) {
+                return null;
+            }
+        }
+        if (
+            data &&
+            typeof data.ConfiguracionServicioRestEncriptado === 'string' &&
+            data.ConfiguracionServicioRestEncriptado.length > 20
+        ) {
+            return data;
+        }
+        return null;
+    }
+
+    function persistirConfigValidador(cfg, origen) {
+        const norm = normalizarConfigValidador(cfg);
+        if (!norm) return false;
+        configValidador = norm;
+        origenBlobValidador = origen || origenBlobValidador || 'hook';
+        try {
+            localStorage.setItem(CLAVE_VALIDADOR_BLOB, JSON.stringify(norm));
+        } catch (_) {
+            /* quota */
+        }
+        try {
+            refrescarEstadoBlob();
+        } catch (_) {
+            /* panel aún no listo */
+        }
+        return true;
+    }
+
+    function cargarBlobValidadorGuardado() {
+        try {
+            const raw = localStorage.getItem(CLAVE_VALIDADOR_BLOB);
+            if (!raw) return null;
+            return normalizarConfigValidador(JSON.parse(raw));
+        } catch (_) {
+            return null;
+        }
+    }
+
+    function borrarBlobValidador() {
+        configValidador = null;
+        origenBlobValidador = '';
+        try {
+            localStorage.removeItem(CLAVE_VALIDADOR_BLOB);
+        } catch (_) {
+            /* ignore */
+        }
+        refrescarEstadoBlob();
+    }
+
+    function etiquetaOrigenBlob() {
+        if (configValidadorLista()) {
+            if (origenBlobValidador === 'pegado') return 'Blob: pegado';
+            if (origenBlobValidador === 'hook') return 'Blob: hook';
+            return 'Blob: guardado';
+        }
+        return 'Blob: no';
+    }
 
     function guardarConfigSiValidador(url, body) {
         try {
@@ -1811,11 +1884,7 @@
                 if (typeof URLSearchParams !== 'undefined' && raw instanceof URLSearchParams) {
                     raw = raw.toString();
                 } else if (typeof raw === 'object') {
-                    // Algunos wrappers pasan el objeto ya parseado.
-                    if (raw.configuracion && raw.configuracion.ConfiguracionServicioRestEncriptado) {
-                        configValidador = raw.configuracion;
-                        return;
-                    }
+                    if (persistirConfigValidador(raw, 'hook')) return;
                     raw = JSON.stringify(raw);
                 } else {
                     raw = String(raw);
@@ -1823,9 +1892,7 @@
             }
             if (!raw) return;
             const data = JSON.parse(raw);
-            if (data && data.configuracion && data.configuracion.ConfiguracionServicioRestEncriptado) {
-                configValidador = data.configuracion;
-            }
+            persistirConfigValidador(data, 'hook');
         } catch (_) {
             /* ignore */
         }
@@ -1890,12 +1957,17 @@
         hookValidadorListo = true;
     }
 
-    // Sin seed-click: si no hay blob capturado aún, no se fuerza el player.
-    // El camino por clics dispara ValidadorValidar solo; el hook lo guarda para
-    // el próximo ciclo (sondeo rápido sin congelar la UI).
+    // Sin seed-click. Prioridad: memoria → localStorage (pegado/hook previo).
     function configValidadorLista() {
         instalarHookValidador();
-        return !!(configValidador && configValidador.ConfiguracionServicioRestEncriptado);
+        if (configValidador && configValidador.ConfiguracionServicioRestEncriptado) return true;
+        const guardado = cargarBlobValidadorGuardado();
+        if (guardado) {
+            configValidador = guardado;
+            if (!origenBlobValidador) origenBlobValidador = 'guardado';
+            return true;
+        }
+        return false;
     }
 
     function asegurarConfigValidador() {
@@ -2120,6 +2192,7 @@
         // eso dejaba la UI en natural/jurídica ~20–30s y luego desfasaba el player.
         if (usarValidador && configValidadorLista()) {
             try {
+                log(`   Validador: sondeo con blob (${origenBlobValidador || 'listo'})`);
                 const sondeo = await sondearColasPorValidador(tipo);
                 if (sondeo.sinCupo) {
                     log('   Validador: sin colas/trámites → reintento');
@@ -2134,7 +2207,7 @@
             }
         } else if (usarValidador) {
             instalarHookValidador();
-            log('   Validador: sin blob aún → clics (se captura en este ciclo)');
+            log('   Validador: sin blob → clics (pega en panel o espera hook)');
         }
 
         return caminoHastaTramitePorClics(opts);
@@ -2855,7 +2928,7 @@
         $panel = document.createElement('div');
         $panel.style.cssText =
             'position:fixed;z-index:999999;right:12px;bottom:12px;background:#fff;border:1px solid #999;' +
-            'border-radius:8px;padding:10px 12px;font:12px/1.4 system-ui,sans-serif;box-shadow:0 2px 10px rgba(0,0,0,.25);max-width:280px';
+            'border-radius:8px;padding:10px 12px;font:12px/1.4 system-ui,sans-serif;box-shadow:0 2px 10px rgba(0,0,0,.25);max-width:320px';
 
         const titulo = document.createElement('strong');
         titulo.textContent = 'Super Scheduler';
@@ -2868,6 +2941,72 @@
 
         const boton = document.createElement('button');
         boton.style.cssText = 'cursor:pointer;padding:4px 10px;border:1px solid #666;border-radius:4px;background:#f3f3f3';
+
+        const $blobEstado = document.createElement('div');
+        $blobEstado.style.cssText = 'margin:4px 0 0;color:#555;font-size:11px';
+        refrescarEstadoBlob = () => {
+            $blobEstado.textContent = etiquetaOrigenBlob();
+        };
+
+        const bloqueBlob = document.createElement('div');
+        bloqueBlob.style.cssText = 'display:none;margin-top:8px;';
+        const areaBlob = document.createElement('textarea');
+        areaBlob.placeholder =
+            'Pega aquí el JSON de configuracion (o el body completo del POST ValidadorValidar)';
+        areaBlob.style.cssText =
+            'width:100%;min-height:72px;box-sizing:border-box;font:11px/1.3 ui-monospace,monospace;' +
+            'border:1px solid #bbb;border-radius:4px;padding:4px;resize:vertical';
+        const filaBlob = document.createElement('div');
+        filaBlob.style.cssText = 'display:flex;gap:6px;margin-top:4px;flex-wrap:wrap';
+        const btnGuardarBlob = document.createElement('button');
+        btnGuardarBlob.textContent = 'Guardar blob';
+        btnGuardarBlob.style.cssText = boton.style.cssText;
+        btnGuardarBlob.onclick = () => {
+            const texto = areaBlob.value.trim();
+            if (!texto) {
+                pintar('Blob vacío: pega el JSON primero.');
+                return;
+            }
+            let parsed;
+            try {
+                parsed = JSON.parse(texto);
+            } catch (e) {
+                pintar('Blob inválido: no es JSON.');
+                return;
+            }
+            if (!persistirConfigValidador(parsed, 'pegado')) {
+                pintar('Blob inválido: falta ConfiguracionServicioRestEncriptado.');
+                return;
+            }
+            areaBlob.value = '';
+            bloqueBlob.style.display = 'none';
+            pintar('Blob Validador guardado en este navegador.');
+            refrescarEstadoBlob();
+        };
+        const btnBorrarBlob = document.createElement('button');
+        btnBorrarBlob.textContent = 'Borrar blob';
+        btnBorrarBlob.style.cssText = boton.style.cssText;
+        btnBorrarBlob.onclick = () => {
+            borrarBlobValidador();
+            areaBlob.value = '';
+            pintar('Blob Validador borrado.');
+        };
+        filaBlob.append(btnGuardarBlob, btnBorrarBlob);
+        bloqueBlob.append(areaBlob, filaBlob);
+
+        const botonBlob = document.createElement('button');
+        botonBlob.textContent = 'Blob…';
+        botonBlob.title = 'Pegar o borrar el blob del Validador (localStorage)';
+        botonBlob.style.cssText = boton.style.cssText;
+        botonBlob.onclick = () => {
+            const abierto = bloqueBlob.style.display !== 'none';
+            bloqueBlob.style.display = abierto ? 'none' : 'block';
+            if (!abierto) {
+                const guardado = cargarBlobValidadorGuardado();
+                areaBlob.value = guardado ? JSON.stringify(guardado, null, 0) : '';
+                areaBlob.focus();
+            }
+        };
 
         const botonExportar = document.createElement('button');
         botonExportar.textContent = 'Exportar citas';
@@ -3004,9 +3143,20 @@
         };
 
         refrescarBoton();
-        botones.append(boton, botonExportar, botonSheet, selectCiudad, selectCola, selectIntervalo);
-        $panel.append(titulo, $estado, botones);
+        botones.append(
+            boton,
+            botonExportar,
+            botonSheet,
+            botonBlob,
+            selectCiudad,
+            selectCola,
+            selectIntervalo,
+        );
+        $panel.append(titulo, $estado, $blobEstado, botones, bloqueBlob);
         document.body.appendChild($panel);
+        // Precarga blob guardado (pegado/hook de sesión anterior).
+        configValidadorLista();
+        refrescarEstadoBlob();
     }
 
     // ────────────────────────────────── ARRANQUE ──────────────────────────────

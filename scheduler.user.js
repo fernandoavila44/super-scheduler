@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Super Scheduler
 // @namespace    super-scheduler
-// @version      1.44
+// @version      1.45
 // @description  Appointment scheduling monitor
 // @match        https://agendamiento.dian.gov.co/*
 // @run-at       document-idle
@@ -55,7 +55,8 @@
             categoriaCodigo: '13',
             // Videoatención / Virtual.
             tipoEspecialidadVirtual: '2',
-            timeoutMs: 20000,
+            // Solo se usa si el blob ya se capturó en un ciclo previo (sin seed-click).
+            timeoutMs: 8000,
         },
 
         // URL /exec y nombre de pestaña (ciudad) no van en el repo: se guardan en
@@ -1802,22 +1803,37 @@
     let configValidador = null;
     let hookValidadorListo = false;
 
+    function guardarConfigSiValidador(url, body) {
+        try {
+            if (!url || String(url).indexOf('ValidadorValidar') < 0) return;
+            let raw = body;
+            if (raw && typeof raw !== 'string') {
+                if (typeof URLSearchParams !== 'undefined' && raw instanceof URLSearchParams) {
+                    raw = raw.toString();
+                } else if (typeof raw === 'object') {
+                    // Algunos wrappers pasan el objeto ya parseado.
+                    if (raw.configuracion && raw.configuracion.ConfiguracionServicioRestEncriptado) {
+                        configValidador = raw.configuracion;
+                        return;
+                    }
+                    raw = JSON.stringify(raw);
+                } else {
+                    raw = String(raw);
+                }
+            }
+            if (!raw) return;
+            const data = JSON.parse(raw);
+            if (data && data.configuracion && data.configuracion.ConfiguracionServicioRestEncriptado) {
+                configValidador = data.configuracion;
+            }
+        } catch (_) {
+            /* ignore */
+        }
+    }
+
     function instalarHookValidador() {
         if (hookValidadorListo) return;
         const win = vistaPagina();
-        const guardarSiValidador = (url, body) => {
-            try {
-                if (!url || String(url).indexOf('ValidadorValidar') < 0) return;
-                const raw = typeof body === 'string' ? body : body == null ? '' : String(body);
-                if (!raw) return;
-                const data = JSON.parse(raw);
-                if (data && data.configuracion && data.configuracion.ConfiguracionServicioRestEncriptado) {
-                    configValidador = data.configuracion;
-                }
-            } catch (_) {
-                /* ignore */
-            }
-        };
 
         try {
             const XO = win.XMLHttpRequest;
@@ -1829,7 +1845,7 @@
                     return open.apply(this, arguments);
                 };
                 XO.prototype.send = function (body) {
-                    guardarSiValidador(this.__ssUrl, body);
+                    guardarConfigSiValidador(this.__ssUrl, body);
                     return send.apply(this, arguments);
                 };
             }
@@ -1844,7 +1860,7 @@
                     try {
                         const url = typeof input === 'string' ? input : input && input.url;
                         const body = init && init.body;
-                        guardarSiValidador(url, body);
+                        guardarConfigSiValidador(url, body);
                     } catch (_) {
                         /* ignore */
                     }
@@ -1855,76 +1871,35 @@
             /* ignore */
         }
 
+        // ASP.NET / jQuery.ajax si el player no usa XHR.prototype a pelo.
+        try {
+            const jq = win.jQuery || win.$;
+            if (jq && typeof jq.ajaxPrefilter === 'function') {
+                jq.ajaxPrefilter((options) => {
+                    try {
+                        guardarConfigSiValidador(options && options.url, options && options.data);
+                    } catch (_) {
+                        /* ignore */
+                    }
+                });
+            }
+        } catch (_) {
+            /* ignore */
+        }
+
         hookValidadorListo = true;
     }
 
-    function buscarConfigValidadorEnPagina() {
-        const win = vistaPagina();
-        const visto = new Set();
-        const cola = [win];
-        let pasos = 0;
-        while (cola.length && pasos < 400) {
-            pasos++;
-            const obj = cola.shift();
-            if (!obj || typeof obj !== 'object') continue;
-            if (visto.has(obj)) continue;
-            visto.add(obj);
-            try {
-                if (
-                    obj.ConfiguracionServicioRestEncriptado &&
-                    typeof obj.ConfiguracionServicioRestEncriptado === 'string' &&
-                    obj.ConfiguracionServicioRestEncriptado.length > 20
-                ) {
-                    return obj;
-                }
-            } catch (_) {
-                continue;
-            }
-            let keys;
-            try {
-                keys = Object.keys(obj);
-            } catch (_) {
-                continue;
-            }
-            for (let i = 0; i < keys.length && i < 40; i++) {
-                try {
-                    const v = obj[keys[i]];
-                    if (v && typeof v === 'object') cola.push(v);
-                } catch (_) {
-                    /* ignore */
-                }
-            }
-        }
-        return null;
+    // Sin seed-click: si no hay blob capturado aún, no se fuerza el player.
+    // El camino por clics dispara ValidadorValidar solo; el hook lo guarda para
+    // el próximo ciclo (sondeo rápido sin congelar la UI).
+    function configValidadorLista() {
+        instalarHookValidador();
+        return !!(configValidador && configValidador.ConfiguracionServicioRestEncriptado);
     }
 
-    async function asegurarConfigValidador(timeoutMs) {
-        instalarHookValidador();
-        if (configValidador && configValidador.ConfiguracionServicioRestEncriptado) {
-            return configValidador;
-        }
-        const hallada = buscarConfigValidadorEnPagina();
-        if (hallada) {
-            configValidador = hallada;
-            return configValidador;
-        }
-        // Semilla: un clic en Agendar hace que el player dispare el Validador.
-        const btn = buscar('div[nombrecontrol="btnSolicitarCita"]');
-        if (btn) {
-            clicar(resolverObjetivo(btn));
-            const limite = Date.now() + (timeoutMs || 8000);
-            while (Date.now() < limite) {
-                if (configValidador && configValidador.ConfiguracionServicioRestEncriptado) {
-                    return configValidador;
-                }
-                const otra = buscarConfigValidadorEnPagina();
-                if (otra) {
-                    configValidador = otra;
-                    return configValidador;
-                }
-                await dormir(150);
-            }
-        }
+    function asegurarConfigValidador() {
+        if (configValidadorLista()) return configValidador;
         return null;
     }
 
@@ -1991,8 +1966,8 @@
 
     async function postValidadorValidar(respuestaBase) {
         const cfg = CONFIG.validador || {};
-        const configuracion = await asegurarConfigValidador(cfg.timeoutMs || 8000);
-        if (!configuracion) throw new Error('sin configuracion del Validador en la página');
+        const configuracion = asegurarConfigValidador();
+        if (!configuracion) throw new Error('sin blob del Validador (aún no capturado)');
 
         const win = vistaPagina();
         const url = cfg.url || '/Player.aspx/ValidadorValidar';
@@ -2002,14 +1977,30 @@
             respuestaBase,
         });
 
-        const res = await win.fetch(url, {
-            method: 'POST',
-            credentials: 'same-origin',
-            headers: {
-                'Content-Type': 'application/json; charset=utf-8',
-            },
-            body,
-        });
+        const ctrl =
+            typeof AbortController !== 'undefined' ? new AbortController() : null;
+        const t = setTimeout(() => {
+            try {
+                if (ctrl) ctrl.abort();
+            } catch (_) {
+                /* ignore */
+            }
+        }, cfg.timeoutMs || 8000);
+
+        let res;
+        try {
+            res = await win.fetch(url, {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: {
+                    'Content-Type': 'application/json; charset=utf-8',
+                },
+                body,
+                signal: ctrl ? ctrl.signal : undefined,
+            });
+        } finally {
+            clearTimeout(t);
+        }
         if (!res.ok) throw new Error('Validador HTTP ' + res.status);
         const text = await res.text();
         let raw;
@@ -2125,9 +2116,10 @@
         tipoPersonaCiclo = tipo;
 
         const usarValidador = CONFIG.validador && CONFIG.validador.activo !== false;
-        if (usarValidador) {
+        // Solo sondea si el blob ya se capturó (ciclo previo). Nunca hace seed-click:
+        // eso dejaba la UI en natural/jurídica ~20–30s y luego desfasaba el player.
+        if (usarValidador && configValidadorLista()) {
             try {
-                instalarHookValidador();
                 const sondeo = await sondearColasPorValidador(tipo);
                 if (sondeo.sinCupo) {
                     log('   Validador: sin colas/trámites → reintento');
@@ -2140,6 +2132,9 @@
                 if (esSinCupo(e)) throw e;
                 log(`   Validador falló (${e.message}); camino por clics`);
             }
+        } else if (usarValidador) {
+            instalarHookValidador();
+            log('   Validador: sin blob aún → clics (se captura en este ciclo)');
         }
 
         return caminoHastaTramitePorClics(opts);

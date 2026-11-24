@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Super Scheduler
 // @namespace    super-scheduler
-// @version      1.49
+// @version      1.50
 // @description  Appointment scheduling monitor
 // @match        https://agendamiento.dian.gov.co/*
 // @run-at       document-idle
@@ -35,9 +35,10 @@
         // Tras softMaxSeguidos fallos seguidos, o si no se puede volver a
         // Categoría, se recarga la página (estado del player limpio).
         reintento: {
-            // Soft retries antes de hard refresh. No hay tope técnico; 20–50 es
-            // razonable. Muy alto = el player puede degradarse sin limpiar DOM.
+            // Soft retries antes de hard refresh. El valor activo se elige en el
+            // panel (localStorage); si no hay selección → softMaxSeguidos (20).
             softMaxSeguidos: 20,
+            softMaxOpciones: [10, 20, 30, 50, 100],
             selCategoria:
                 'div.boton.btnCategoria[llave="63071985-f5bd-43fe-beed-38f64c97371b"]',
             selAnterior: 'div[tipo="Control"][nombre="btnAnterior"]',
@@ -310,6 +311,7 @@
     const CLAVE_HOJA = 'ssSheetHoja';
     const CLAVE_COLA = 'ssSheetCola';
     const CLAVE_INTERVALO = 'ssIntervaloSegundos';
+    const CLAVE_SOFT_MAX = 'ssSoftMaxSeguidos';
     // Blob Validador (JSON de configuracion). Solo en este navegador.
     const CLAVE_VALIDADOR_BLOB = 'ssValidadorBlob';
     // Últimas líneas de diagnóstico (consola + localStorage). No es un archivo.
@@ -337,6 +339,21 @@
         return permitidos.includes(def) ? def : permitidos[0];
     }
     const intervaloMs = () => intervaloSegundos() * 1000;
+
+    // Soft retries antes de hard refresh (dropdown del panel → localStorage).
+    function softMaxSeguidos() {
+        const rein = CONFIG.reintento || {};
+        const permitidos = rein.softMaxOpciones || [10, 20, 30, 50, 100];
+        const raw = localStorage.getItem(CLAVE_SOFT_MAX);
+        if (raw === null || raw === '') {
+            const def = Number(rein.softMaxSeguidos) || 20;
+            return permitidos.includes(def) ? def : 20;
+        }
+        const guardado = Number(raw);
+        if (permitidos.includes(guardado)) return guardado;
+        const def = Number(rein.softMaxSeguidos) || 20;
+        return permitidos.includes(def) ? def : 20;
+    }
 
     // Caché por ciudad (+ cola) para no mezclar Bogotá A con Bogotá B ni con Medellín.
     const claveClientes = () => {
@@ -2919,7 +2936,7 @@
             }
         }
 
-        const maxSoft = (CONFIG.reintento && CONFIG.reintento.softMaxSeguidos) || 8;
+        const maxSoft = softMaxSeguidos();
         let usarSoft = false;
         if (fueSinCupo) {
             softSeguidos += 1;
@@ -3187,6 +3204,25 @@
             }
         };
 
+        const selectSoftMax = document.createElement('select');
+        selectSoftMax.style.cssText =
+            'cursor:pointer;padding:4px 8px;border:1px solid #666;border-radius:4px;background:#f3f3f3;max-width:110px';
+        selectSoftMax.title = 'Soft retries antes de recargar la página (default 20)';
+        for (const n of (CONFIG.reintento && CONFIG.reintento.softMaxOpciones) || [
+            10, 20, 30, 50, 100,
+        ]) {
+            const op = document.createElement('option');
+            op.value = String(n);
+            op.textContent = `Soft ${n}`;
+            selectSoftMax.appendChild(op);
+        }
+        selectSoftMax.value = String(softMaxSeguidos());
+        selectSoftMax.onchange = () => {
+            const n = Number(selectSoftMax.value);
+            localStorage.setItem(CLAVE_SOFT_MAX, String(n));
+            pintar(`Soft retry máx: ${n} (luego recarga).`);
+        };
+
         refrescarBoton = () => {
             boton.textContent = leerEstado().activo ? 'Detener' : 'Iniciar';
         };
@@ -3220,6 +3256,7 @@
             selectCiudad,
             selectCola,
             selectIntervalo,
+            selectSoftMax,
         );
         $panel.append(titulo, $estado, $blobEstado, botones, bloqueBlob);
         document.body.appendChild($panel);

@@ -58,7 +58,9 @@
             categoriaCodigo: '13',
             // Videoatención / Virtual.
             tipoEspecialidadVirtual: '2',
-            timeoutMs: 8000,
+            // Techo del POST (responde antes → sigue al instante). 30s evita
+            // caer a clics solo porque la red va lenta.
+            timeoutMs: 30000,
         },
 
         // URL /exec y nombre de pestaña (ciudad) no van en el repo: se guardan en
@@ -2156,7 +2158,7 @@
             JSON.stringify(respuestaBase) +
             '}';
 
-        const timeoutMs = cfg.timeoutMs || 8000;
+        const timeoutMs = cfg.timeoutMs || 30000;
         return await new Promise((resolve, reject) => {
             let listo = false;
             const timer = setTimeout(() => {

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Super Scheduler (sandbox)
 // @namespace    super-scheduler
-// @version      1.42-sandbox
+// @version      1.43-sandbox
 // @description  [SANDBOX] Appointment scheduling monitor
 // @match        https://agendamiento.dian.gov.co/*
 // @run-at       document-idle
@@ -103,44 +103,20 @@
         // Cada paso acepta: espera (ms), esperaHasta (sel o "a, b"), omitirSiMarcado,
         // opcional: true (si falta, no aborta).
         pasos: [
+            // Un solo tramo rápido: Agendar → persona → Videoatención → Devoluciones
+            // → select de trámite. Soft-retry puede entrar con desdeCategoria.
             {
-                sel: 'div[nombrecontrol="btnSolicitarCita"]',
-                desc: 'Solicitar cita',
-                esperaHasta:
-                    'div.boton.btnTipoPersona[llave="1"], div.boton.btnTipoPersona[llave="2"]',
-                espera: 200,
+                accion: 'caminoHastaTramite',
+                desc: 'Camino hasta trámite',
+                espera: 100,
             },
-            // Natural (1) o jurídica (2) según columna tipoPersona del primer pendiente.
-            {
-                accion: 'tipoPersona',
-                desc: 'Tipo de persona',
-                esperaHasta: 'div.boton.btnTipoAtencion[llave="2"]',
-                espera: 200,
-            },
-            {
-                sel: 'div.boton.btnTipoAtencion[llave="2"]',
-                desc: 'Tipo de atención',
-                esperaHasta:
-                    'div.boton.btnCategoria[llave="63071985-f5bd-43fe-beed-38f64c97371b"]',
-                espera: 200,
-            },
-            {
-                sel: 'div.boton.btnCategoria[llave="63071985-f5bd-43fe-beed-38f64c97371b"]',
-                desc: 'Categoría del trámite',
-                // Servicios OK, o ModalError si no hay cupo (no esperar 45 s al select).
-                esperaHasta:
-                    'div[nombrecontrol="Servicios"] select.customSelect, div[tipo="Control"][pantalla="ModalError"][nombre="btnAceptar"]',
-                espera: 200,
-            },
-            { accion: 'sinEspecialidades', desc: '¿Hay especialidades?' },
-            // Abre el trámite y elige al primer cliente pendiente cuya ciudad
-            // aparezca entre las opciones. Si no aparece, prueba con el siguiente.
+            // Elige al primer pendiente (mismo tipoPersona) cuya ciudad esté en opciones.
             {
                 accion: 'tramite',
                 desc: 'Trámite del cliente',
                 esperaHasta:
                     'div[tipo="Control"][pantalla="PasoUno"][nombre="btnSiguiente"]',
-                espera: 200,
+                espera: 150,
             },
             // Hay un btnSiguiente por paso, más una variante btnSiguienteBlock que es
             // la deshabilitada. Se apunta al del PasoUno y solo al habilitado.
@@ -1796,23 +1772,48 @@
         }
     }
 
-    // El player pide tipo de persona antes del trámite. Se toma el del primer
-    // pendiente (columna tipoPersona); en el trámite solo se prueban del mismo tipo.
-    async function elegirTipoPersona() {
+    // Clic cuando el control aparece (página lenta). Sin esperas fijas largas.
+    async function clicCuandoVisible(sel, desc, timeoutMs) {
+        const el = await esperarElemento(sel, null, timeoutMs);
+        if (!el) throw new Error(`No apareció: ${desc || sel}`);
+        el.scrollIntoView({ block: 'center' });
+        clicar(resolverObjetivo(el));
+        return el;
+    }
+
+    // Agendar → tipoPersona (Sheet) → Videoatención → Devoluciones → listo para trámite.
+    // opts.desdeCategoria: soft-retry (ya en PasoUno con categorías a la vista).
+    async function caminoHastaTramite(opts = {}) {
+        const timeout = CONFIG.timeoutElementoMs;
+        const selCat =
+            (CONFIG.reintento && CONFIG.reintento.selCategoria) ||
+            'div.boton.btnCategoria[llave="63071985-f5bd-43fe-beed-38f64c97371b"]';
+        const selVideo = 'div.boton.btnTipoAtencion[llave="2"]';
         const pendientes = cargarClientes().filter((c) => !c.scheduled);
         const tipo = pendientes.length
             ? normalizarTipoPersonaCliente(pendientes[0].tipoPersona)
             : '1';
         tipoPersonaCiclo = tipo;
-        const sel = `div.boton.btnTipoPersona[llave="${tipo}"]`;
-        const el = await esperarElemento(sel, null, CONFIG.timeoutElementoMs);
-        if (!el) throw new Error(`No apareció tipo de persona llave=${tipo}`);
-        el.scrollIntoView({ block: 'center' });
-        clicar(resolverObjetivo(el));
-        log(
-            `   tipo persona: ${tipo === '2' ? 'jurídica' : 'natural'} (llave=${tipo})` +
-                (pendientes[0] ? ` ← ${pendientes[0].cedula}` : ''),
-        );
+
+        if (!opts.desdeCategoria) {
+            await clicCuandoVisible(
+                'div[nombrecontrol="btnSolicitarCita"]',
+                'Agendar cita',
+                timeout,
+            );
+            await esperarSinCarga(Math.min(8000, timeout), { lanzarSinCupo: false });
+            await clicCuandoVisible(
+                `div.boton.btnTipoPersona[llave="${tipo}"]`,
+                `tipo persona llave=${tipo}`,
+                timeout,
+            );
+            log(`   tipo persona: ${tipo === '2' ? 'jurídica' : 'natural'} (llave=${tipo})`);
+            await clicCuandoVisible(selVideo, 'Videoatención', timeout);
+        }
+
+        await clicCuandoVisible(selCat, 'Devoluciones', timeout);
+        // Servicios con opciones, o ModalError sin cupo.
+        await revisarSinEspecialidades();
         return true;
     }
 
@@ -1985,13 +1986,8 @@
     }
 
     async function ejecutarPaso(paso) {
-        if (paso.accion === 'sinEspecialidades') {
-            await revisarSinEspecialidades();
-            return true;
-        }
-
-        if (paso.accion === 'tipoPersona') {
-            await elegirTipoPersona();
+        if (paso.accion === 'caminoHastaTramite') {
+            await caminoHastaTramite({ desdeCategoria: !!paso.desdeCategoria });
             await estabilizarTrasPaso(paso);
             return true;
         }
@@ -2265,8 +2261,9 @@
 
     // ───────────────────────────────── CICLO ──────────────────────────────────
 
-    function indicePasoCategoria() {
-        const idx = CONFIG.pasos.findIndex((p) => p.sel && p.sel.includes('btnCategoria'));
+    // Soft-retry reentra en el camino (solo Devoluciones→trámites), no desde Inicio.
+    function indicePasoCaminoHastaTramite() {
+        const idx = CONFIG.pasos.findIndex((p) => p.accion === 'caminoHastaTramite');
         return idx >= 0 ? idx : 0;
     }
 
@@ -2361,7 +2358,12 @@
                 }
                 if (desde === 'categoria') {
                     softDesdeCategoria = true;
-                    pasos = CONFIG.pasos.slice(indicePasoCategoria());
+                    const idx = indicePasoCaminoHastaTramite();
+                    pasos = CONFIG.pasos.slice(idx).map((p, i) =>
+                        i === 0 && p.accion === 'caminoHastaTramite'
+                            ? { ...p, desdeCategoria: true }
+                            : p,
+                    );
                 } else {
                     pasos = CONFIG.pasos;
                 }

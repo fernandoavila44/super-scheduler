@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Super Scheduler (sandbox)
 // @namespace    super-scheduler
-// @version      1.46-sandbox
+// @version      1.47-sandbox
 // @description  [SANDBOX] Appointment scheduling monitor
 // @match        https://agendamiento.dian.gov.co/*
 // @run-at       document-idle
@@ -1806,6 +1806,82 @@
     let hookValidadorListo = false;
     let refrescarEstadoBlob = () => {};
 
+    // Extrae un {...} con llaves balanceadas desde `desde` (índice de '{').
+    function extraerObjetoBalanceado(texto, desde) {
+        if (!texto || texto[desde] !== '{') return null;
+        let profundidad = 0;
+        let enString = false;
+        let escape = false;
+        let comilla = '';
+        for (let i = desde; i < texto.length; i++) {
+            const ch = texto[i];
+            if (enString) {
+                if (escape) {
+                    escape = false;
+                    continue;
+                }
+                if (ch === '\\') {
+                    escape = true;
+                    continue;
+                }
+                if (ch === comilla) enString = false;
+                continue;
+            }
+            if (ch === '"' || ch === "'") {
+                enString = true;
+                comilla = ch;
+                continue;
+            }
+            if (ch === '{') profundidad++;
+            else if (ch === '}') {
+                profundidad--;
+                if (profundidad === 0) return texto.slice(desde, i + 1);
+            }
+        }
+        return null;
+    }
+
+    // DevTools "Payload" a veces no es JSON estricto (nombre:'...' sin comillas en claves).
+    // Acepta: JSON puro, body estilo DevTools, o solo el objeto configuracion.
+    function parseTextoBlobValidador(texto) {
+        const raw = String(texto || '').trim();
+        if (!raw) return null;
+
+        try {
+            return JSON.parse(raw);
+        } catch (_) {
+            /* seguir */
+        }
+
+        const idxCfg = raw.search(/configuracion\s*:/);
+        if (idxCfg >= 0) {
+            const despues = raw.slice(idxCfg).search(/\{/);
+            if (despues >= 0) {
+                const abs = idxCfg + despues;
+                const bloque = extraerObjetoBalanceado(raw, abs);
+                if (bloque) {
+                    try {
+                        return JSON.parse(bloque);
+                    } catch (_) {
+                        /* seguir */
+                    }
+                }
+            }
+        }
+
+        // Aproximación: comillar claves sueltas y pasar ' a " (payload DevTools).
+        try {
+            const approx = raw
+                .replace(/([,{]\s*)([A-Za-z_][A-Za-z0-9_]*)\s*:/g, '$1"$2":')
+                .replace(/'/g, '"');
+            return JSON.parse(approx);
+        } catch (_) {
+            /* seguir */
+        }
+
+        return null;
+    }
+
     // Acepta el objeto configuracion o el body completo del POST.
     function normalizarConfigValidador(data) {
         if (!data || typeof data !== 'object') return null;
@@ -2952,7 +3028,7 @@
         bloqueBlob.style.cssText = 'display:none;margin-top:8px;';
         const areaBlob = document.createElement('textarea');
         areaBlob.placeholder =
-            'Pega aquí el JSON de configuracion (o el body completo del POST ValidadorValidar)';
+            'Pega el Payload de ValidadorValidar (vale el de DevTools) o solo configuracion';
         areaBlob.style.cssText =
             'width:100%;min-height:72px;box-sizing:border-box;font:11px/1.3 ui-monospace,monospace;' +
             'border:1px solid #bbb;border-radius:4px;padding:4px;resize:vertical';
@@ -2964,14 +3040,12 @@
         btnGuardarBlob.onclick = () => {
             const texto = areaBlob.value.trim();
             if (!texto) {
-                pintar('Blob vacío: pega el JSON primero.');
+                pintar('Blob vacío: pega el payload primero.');
                 return;
             }
-            let parsed;
-            try {
-                parsed = JSON.parse(texto);
-            } catch (e) {
-                pintar('Blob inválido: no es JSON.');
+            const parsed = parseTextoBlobValidador(texto);
+            if (!parsed) {
+                pintar('Blob inválido: no se pudo leer (JSON o Payload DevTools).');
                 return;
             }
             if (!persistirConfigValidador(parsed, 'pegado')) {

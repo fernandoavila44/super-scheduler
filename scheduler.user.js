@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Super Scheduler (sandbox)
 // @namespace    super-scheduler
-// @version      1.43-sandbox
+// @version      1.44-sandbox
 // @description  [SANDBOX] Appointment scheduling monitor
 // @match        https://agendamiento.dian.gov.co/*
 // @run-at       document-idle
@@ -40,6 +40,22 @@
                 'div.boton.btnCategoria[llave="63071985-f5bd-43fe-beed-38f64c97371b"]',
             selAnterior: 'div[tipo="Control"][nombre="btnAnterior"]',
             intentosAnterior: 6,
+        },
+
+        // Sondeo rápido Inicio→colas vía ValidadorValidar (sin esperar el DOM).
+        // El blob ConfiguracionServicioRestEncriptado NO se arma a mano: se captura
+        // del player en la pestaña abierta. Si falla, se usa el camino por clics.
+        validador: {
+            activo: true,
+            url: '/Player.aspx/ValidadorValidar',
+            nombre: 'ValidadorDatos.CitasWeb',
+            recurso: 'CitasDIAN',
+            // Devoluciones (llave + Código del JSON de categorías).
+            categoriaLlave: '63071985-f5bd-43fe-beed-38f64c97371b',
+            categoriaCodigo: '13',
+            // Videoatención / Virtual.
+            tipoEspecialidadVirtual: '2',
+            timeoutMs: 20000,
         },
 
         // URL /exec y nombre de pestaña (ciudad) no van en el repo: se guardan en
@@ -1781,27 +1797,310 @@
         return el;
     }
 
-    // Agendar → tipoPersona (Sheet) → Videoatención → Devoluciones → listo para trámite.
-    // opts.desdeCategoria: soft-retry (ya en PasoUno con categorías a la vista).
-    async function caminoHastaTramite(opts = {}) {
+    // ─── ValidadorValidar (sondeo rápido de colas) ───────────────────────────
+    // El blob encriptado lo emite el player; cada PC/sesión lo captura solo.
+    let configValidador = null;
+    let hookValidadorListo = false;
+
+    function instalarHookValidador() {
+        if (hookValidadorListo) return;
+        const win = vistaPagina();
+        const guardarSiValidador = (url, body) => {
+            try {
+                if (!url || String(url).indexOf('ValidadorValidar') < 0) return;
+                const raw = typeof body === 'string' ? body : body == null ? '' : String(body);
+                if (!raw) return;
+                const data = JSON.parse(raw);
+                if (data && data.configuracion && data.configuracion.ConfiguracionServicioRestEncriptado) {
+                    configValidador = data.configuracion;
+                }
+            } catch (_) {
+                /* ignore */
+            }
+        };
+
+        try {
+            const XO = win.XMLHttpRequest;
+            if (XO && XO.prototype) {
+                const open = XO.prototype.open;
+                const send = XO.prototype.send;
+                XO.prototype.open = function (method, url) {
+                    this.__ssUrl = url;
+                    return open.apply(this, arguments);
+                };
+                XO.prototype.send = function (body) {
+                    guardarSiValidador(this.__ssUrl, body);
+                    return send.apply(this, arguments);
+                };
+            }
+        } catch (_) {
+            /* ignore */
+        }
+
+        try {
+            if (typeof win.fetch === 'function') {
+                const origFetch = win.fetch.bind(win);
+                win.fetch = function (input, init) {
+                    try {
+                        const url = typeof input === 'string' ? input : input && input.url;
+                        const body = init && init.body;
+                        guardarSiValidador(url, body);
+                    } catch (_) {
+                        /* ignore */
+                    }
+                    return origFetch(input, init);
+                };
+            }
+        } catch (_) {
+            /* ignore */
+        }
+
+        hookValidadorListo = true;
+    }
+
+    function buscarConfigValidadorEnPagina() {
+        const win = vistaPagina();
+        const visto = new Set();
+        const cola = [win];
+        let pasos = 0;
+        while (cola.length && pasos < 400) {
+            pasos++;
+            const obj = cola.shift();
+            if (!obj || typeof obj !== 'object') continue;
+            if (visto.has(obj)) continue;
+            visto.add(obj);
+            try {
+                if (
+                    obj.ConfiguracionServicioRestEncriptado &&
+                    typeof obj.ConfiguracionServicioRestEncriptado === 'string' &&
+                    obj.ConfiguracionServicioRestEncriptado.length > 20
+                ) {
+                    return obj;
+                }
+            } catch (_) {
+                continue;
+            }
+            let keys;
+            try {
+                keys = Object.keys(obj);
+            } catch (_) {
+                continue;
+            }
+            for (let i = 0; i < keys.length && i < 40; i++) {
+                try {
+                    const v = obj[keys[i]];
+                    if (v && typeof v === 'object') cola.push(v);
+                } catch (_) {
+                    /* ignore */
+                }
+            }
+        }
+        return null;
+    }
+
+    async function asegurarConfigValidador(timeoutMs) {
+        instalarHookValidador();
+        if (configValidador && configValidador.ConfiguracionServicioRestEncriptado) {
+            return configValidador;
+        }
+        const hallada = buscarConfigValidadorEnPagina();
+        if (hallada) {
+            configValidador = hallada;
+            return configValidador;
+        }
+        // Semilla: un clic en Agendar hace que el player dispare el Validador.
+        const btn = buscar('div[nombrecontrol="btnSolicitarCita"]');
+        if (btn) {
+            clicar(resolverObjetivo(btn));
+            const limite = Date.now() + (timeoutMs || 8000);
+            while (Date.now() < limite) {
+                if (configValidador && configValidador.ConfiguracionServicioRestEncriptado) {
+                    return configValidador;
+                }
+                const otra = buscarConfigValidadorEnPagina();
+                if (otra) {
+                    configValidador = otra;
+                    return configValidador;
+                }
+                await dormir(150);
+            }
+        }
+        return null;
+    }
+
+    function plantillaCitaValidador(tipoCliente, tipoEspecialidad) {
+        const virtual = String(tipoEspecialidad || '0') === '2';
+        return {
+            CodigoCita: null,
+            CodigoCitaModificada: null,
+            Cola: { IdEspecialidad: '0', Nombre: null },
+            TipoEspecialidad: {
+                IdTipoEspecialidad: virtual ? 2 : Number(tipoEspecialidad) || 0,
+                Nombre: virtual ? 'Virtual' : null,
+            },
+            Oficina: {
+                IdOficina: virtual ? '001' : 0,
+                Nombre: null,
+                Latitud: 0,
+                Longitud: 0,
+            },
+            UsuarioCliente: {
+                IdTipoCliente: String(tipoCliente || '1'),
+                IdTipoDocumento: 0,
+                Nombre: null,
+                Apellido: null,
+                NumeroDocumento: null,
+                CorreoElectronico: null,
+                Celular: null,
+                Telefono: null,
+                Direccion: null,
+                IdCiudad: 0,
+                IdEstado: 0,
+                AceptaPoliticaDatos: false,
+            },
+            Fecha: '2001-01-01T17:00:00.000Z',
+            Hora: '2001-01-01T17:00:00.000Z',
+            IdAgenda: 0,
+            Estado: { IdEstado: 0, Nombre: null },
+            Funcionario: { NombreAMostrar: null, Id: null },
+            Archivo: null,
+            CamposAdicionales: null,
+            EsFlujoCitaCreacion: 'true',
+        };
+    }
+
+    function parseRespuestaValidador(data) {
+        if (data == null) return null;
+        if (typeof data === 'string') {
+            try {
+                return JSON.parse(data);
+            } catch (_) {
+                return null;
+            }
+        }
+        if (typeof data.d === 'string') {
+            try {
+                return JSON.parse(data.d);
+            } catch (_) {
+                return data;
+            }
+        }
+        if (data.d && typeof data.d === 'object') return data.d;
+        return data;
+    }
+
+    async function postValidadorValidar(respuestaBase) {
+        const cfg = CONFIG.validador || {};
+        const configuracion = await asegurarConfigValidador(cfg.timeoutMs || 8000);
+        if (!configuracion) throw new Error('sin configuracion del Validador en la página');
+
+        const win = vistaPagina();
+        const url = cfg.url || '/Player.aspx/ValidadorValidar';
+        const body = JSON.stringify({
+            nombre: cfg.nombre || 'ValidadorDatos.CitasWeb',
+            configuracion,
+            respuestaBase,
+        });
+
+        const res = await win.fetch(url, {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: {
+                'Content-Type': 'application/json; charset=utf-8',
+            },
+            body,
+        });
+        if (!res.ok) throw new Error('Validador HTTP ' + res.status);
+        const text = await res.text();
+        let raw;
+        try {
+            raw = JSON.parse(text);
+        } catch (e) {
+            throw new Error('Validador no devolvió JSON');
+        }
+        const parsed = parseRespuestaValidador(raw);
+        if (!parsed) throw new Error('Validador: respuesta vacía');
+        return parsed;
+    }
+
+    // 4 POST: tipos cliente → especialidad → categorías → colas/trámites.
+    // Devuelve { sinCupo, colas } o lanza si la red/config falla (el caller hace fallback).
+    async function sondearColasPorValidador(tipoCliente) {
+        const cfg = CONFIG.validador || {};
+        const recurso = cfg.recurso || 'CitasDIAN';
+        const tipo = String(tipoCliente || '1');
+        const tipoVirt = String(cfg.tipoEspecialidadVirtual || '2');
+        const codCat = String(cfg.categoriaCodigo || '13');
+
+        const r1 = await postValidadorValidar({
+            Fuente: 'Validador',
+            Encontrado: false,
+            DetalleAdicional: 'manejadorEncontroTiposCliente',
+            ObjetosEncontrados: [],
+            Recurso: recurso,
+        });
+        if (!r1.Encontrado) throw new Error('Validador: sin tipos de cliente');
+
+        const r2 = await postValidadorValidar({
+            Fuente: 'Validador',
+            Encontrado: false,
+            DetalleAdicional: 'manejadorEncontroTiposEspecialidad',
+            ObjetosEncontrados: [JSON.stringify(plantillaCitaValidador(tipo, 0))],
+            Recurso: recurso,
+        });
+        if (!r2.Encontrado) throw new Error('Validador: sin tipos de especialidad');
+
+        const r3 = await postValidadorValidar({
+            Fuente: 'Validador',
+            Encontrado: false,
+            DetalleAdicional: 'manejadorEncontroCategoria',
+            ObjetosEncontrados: [tipoVirt],
+            Recurso: recurso,
+        });
+        if (!r3.Encontrado) throw new Error('Validador: sin categorías');
+
+        const r4 = await postValidadorValidar({
+            Fuente: 'Validador',
+            Encontrado: false,
+            DetalleAdicional: 'manejadorEncontroColas',
+            ObjetosEncontrados: [
+                JSON.stringify(plantillaCitaValidador(tipo, tipoVirt)),
+                'Nombre',
+                tipo,
+                codCat,
+                tipoVirt,
+            ],
+            Recurso: recurso,
+        });
+
+        const detalle = String(r4.DetalleAdicional || '');
+        if (detalle.indexOf('NoEncontroColas') >= 0 || !r4.Encontrado) {
+            return { sinCupo: true, colas: [] };
+        }
+        return {
+            sinCupo: false,
+            colas: Array.isArray(r4.ObjetosEncontrados) ? r4.ObjetosEncontrados : [],
+        };
+    }
+
+    // Camino por clics (fallback o para sincronizar el DOM tras sondeo OK).
+    async function caminoHastaTramitePorClics(opts = {}) {
         const timeout = CONFIG.timeoutElementoMs;
         const selCat =
             (CONFIG.reintento && CONFIG.reintento.selCategoria) ||
             'div.boton.btnCategoria[llave="63071985-f5bd-43fe-beed-38f64c97371b"]';
         const selVideo = 'div.boton.btnTipoAtencion[llave="2"]';
-        const pendientes = cargarClientes().filter((c) => !c.scheduled);
-        const tipo = pendientes.length
-            ? normalizarTipoPersonaCliente(pendientes[0].tipoPersona)
-            : '1';
-        tipoPersonaCiclo = tipo;
+        const tipo = tipoPersonaCiclo || '1';
 
         if (!opts.desdeCategoria) {
-            await clicCuandoVisible(
-                'div[nombrecontrol="btnSolicitarCita"]',
-                'Agendar cita',
-                timeout,
-            );
-            await esperarSinCarga(Math.min(8000, timeout), { lanzarSinCupo: false });
+            if (!buscar('div.boton.btnTipoPersona[llave="1"], div.boton.btnTipoPersona[llave="2"]')) {
+                await clicCuandoVisible(
+                    'div[nombrecontrol="btnSolicitarCita"]',
+                    'Agendar cita',
+                    timeout,
+                );
+                await esperarSinCarga(Math.min(8000, timeout), { lanzarSinCupo: false });
+            }
             await clicCuandoVisible(
                 `div.boton.btnTipoPersona[llave="${tipo}"]`,
                 `tipo persona llave=${tipo}`,
@@ -1812,9 +2111,38 @@
         }
 
         await clicCuandoVisible(selCat, 'Devoluciones', timeout);
-        // Servicios con opciones, o ModalError sin cupo.
         await revisarSinEspecialidades();
         return true;
+    }
+
+    // 1) Sondeo Validador (rápido, sin DOM). 2) Si hay colas, clics para alinear el player.
+    // opts.desdeCategoria: soft-retry (UI ya en PasoUno).
+    async function caminoHastaTramite(opts = {}) {
+        const pendientes = cargarClientes().filter((c) => !c.scheduled);
+        const tipo = pendientes.length
+            ? normalizarTipoPersonaCliente(pendientes[0].tipoPersona)
+            : '1';
+        tipoPersonaCiclo = tipo;
+
+        const usarValidador = CONFIG.validador && CONFIG.validador.activo !== false;
+        if (usarValidador) {
+            try {
+                instalarHookValidador();
+                const sondeo = await sondearColasPorValidador(tipo);
+                if (sondeo.sinCupo) {
+                    log('   Validador: sin colas/trámites → reintento');
+                    throw new SinCupo('Validador: no hay colas para Devoluciones/video');
+                }
+                log(
+                    `   Validador: colas OK (${Array.isArray(sondeo.colas) ? sondeo.colas.length : '?'})`,
+                );
+            } catch (e) {
+                if (esSinCupo(e)) throw e;
+                log(`   Validador falló (${e.message}); camino por clics`);
+            }
+        }
+
+        return caminoHastaTramitePorClics(opts);
     }
 
     // La lista de trámites cambia en cada ciclo. Se recorre la cola y se queda con
@@ -2688,6 +3016,7 @@
 
     // ────────────────────────────────── ARRANQUE ──────────────────────────────
 
+    instalarHookValidador();
     crearPanel();
 
     const estado = leerEstado();

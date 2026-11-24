@@ -1,8 +1,9 @@
 // ==UserScript==
 // @name         Super Scheduler
 // @namespace    super-scheduler
-// @version      1.50
+// @version      1.51
 // @description  Appointment scheduling monitor
+
 // @match        https://agendamiento.dian.gov.co/*
 // @run-at       document-idle
 // @grant        GM_xmlhttpRequest

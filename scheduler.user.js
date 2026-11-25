@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Super Scheduler (sandbox)
 // @namespace    super-scheduler
-// @version      1.52-sandbox
-// @description  [SANDBOX] Appointment scheduling monitor + prueba Paso2 Fechas/Horas
+// @version      1.53-sandbox
+// @description  [SANDBOX] Paso2 Fechas/Horas + prueba Reserva/Creo con PII enmascarada
 // @match        https://agendamiento.dian.gov.co/*
 // @run-at       document-idle
 // @grant        GM_xmlhttpRequest
@@ -76,6 +76,18 @@
                 // Fallback si no hay blob pegado/hook (mismo pack CitasDIAN del HAR).
                 blobEncriptado:
                     'n6ch/SV/k+dI4u2UFdFZt/brXMA9zVn5kM201dC5IYv7J3PpQUXUWqySuM59vvO2Emx2PVFvYTtaJ7Rd6sSsRSlPtbn2zrNctjIsohWmnJHvHUPuBieiBA0jm0eX62xUQ+6BFWhtYjg1ePMyZSQYL79D2dZBRPWvmBFKvDrg50aJU/0Tsgpc2oALqH1hAXFJfBsx+jJJ6QvEZWmJH+3a/g==',
+                // Prueba Reserva→Creo SIN Validacion: cédula en claro, resto máscaras.
+                // Si falla → habrá que añadir paso Digiturno5 Validacion.
+                agendarPrueba: {
+                    activo: true,
+                    numeroDocumento: '1049616173',
+                    idTipoDocumento: '2',
+                    nombre: '***** ******',
+                    apellido: '***** ******',
+                    correo: '****@****.com',
+                    celular: '**********',
+                    direccion: '********************',
+                },
             },
         },
 
@@ -2404,7 +2416,131 @@
             log(`   Paso2 slot[${i}] ${h.contenido} → ${h.idAgenda}`);
         });
 
-        return { fechas, fechaConsultada: fechaElegida, horas };
+        return { fechas, fechaConsultada: fechaElegida, horas, slotsRaw: slots };
+    }
+
+    function citaParaAgendarPrueba(fechaIso, slot) {
+        const p2 = (CONFIG.validador && CONFIG.validador.pruebaPaso2) || {};
+        const ag = p2.agendarPrueba || {};
+        const cita = citaParaPruebaPaso2(fechaIso);
+        cita.Hora = slot.HoraAgenda || slot.horaAgenda || cita.Hora;
+        cita.IdAgenda = slot.IdentificadoresAgendas || slot.idAgenda || 0;
+        cita.UsuarioCliente = {
+            IdTipoCliente: String(p2.tipoCliente || '1'),
+            IdTipoDocumento: String(ag.idTipoDocumento || '2'),
+            Nombre: ag.nombre || '***** ******',
+            Apellido: ag.apellido || '***** ******',
+            NumeroDocumento: String(ag.numeroDocumento || ''),
+            CorreoElectronico: ag.correo || '****@****.com',
+            Celular: ag.celular || '**********',
+            Telefono: null,
+            Direccion: ag.direccion || '********************',
+            IdCiudad: 0,
+            IdEstado: 0,
+            AceptaPoliticaDatos: true,
+        };
+        return cita;
+    }
+
+    // Sandbox: Fechas→Horas→Reserva→Creo con cédula clara y PII enmascarada.
+    // Sin Validacion (Digiturno5). Devuelve { ok, codigoCita?, error?, ... }.
+    async function probarAgendarConMascaras() {
+        const p2 = (CONFIG.validador && CONFIG.validador.pruebaPaso2) || {};
+        const ag = p2.agendarPrueba || {};
+        if (p2.activo === false || ag.activo === false) {
+            throw new Error('agendarPrueba desactivada en CONFIG');
+        }
+        const doc = String(ag.numeroDocumento || '').trim();
+        if (!doc) throw new Error('falta agendarPrueba.numeroDocumento');
+
+        const token = String(p2.infoServicioWeb || '').trim();
+        const recurso = (CONFIG.validador && CONFIG.validador.recurso) || 'CitasDIAN';
+
+        const paso2 = await probarPaso2FechasHoras();
+        if (paso2.error) return { ok: false, error: paso2.error, paso2 };
+        if (!paso2.horas || !paso2.horas.length) {
+            return { ok: false, error: 'sin horas para agendar', paso2 };
+        }
+
+        const slot = (paso2.slotsRaw && paso2.slotsRaw[0]) || paso2.horas[0];
+        const idAgenda = slot.IdentificadoresAgendas || slot.idAgenda;
+        const horaLabel = slot.Contenido || slot.contenido || slot.HoraAgenda || '';
+        log(
+            `   Agendar prueba: slot ${horaLabel} IdAgenda=${idAgenda} doc=${doc} (PII máscaras, sin Validacion)`,
+        );
+
+        const cita = citaParaAgendarPrueba(paso2.fechaConsultada, slot);
+        const objs = [JSON.stringify(cita), token, true];
+
+        log('   Agendar prueba: manejadorReservaAgenda…');
+        const rReserva = await postValidadorValidar({
+            Fuente: 'Validador',
+            Encontrado: false,
+            DetalleAdicional: 'manejadorReservaAgenda',
+            ObjetosEncontrados: objs,
+            Recurso: recurso,
+        });
+
+        if (!rReserva.Encontrado) {
+            return {
+                ok: false,
+                paso: 'Reserva',
+                error:
+                    'Reserva Encontrado=false (' +
+                    (rReserva.DetalleAdicional || rReserva.MensajeAdicional || rReserva.ErrorString || '') +
+                    ')',
+                respuesta: rReserva,
+                paso2,
+            };
+        }
+
+        const reservaObj = deserializarObjValidador(
+            (rReserva.ObjetosEncontrados && rReserva.ObjetosEncontrados[0]) || null,
+        );
+        const agendaId =
+            (reservaObj && reservaObj.AgendaDisponibleId) || cita.IdAgenda;
+        if (agendaId) cita.IdAgenda = agendaId;
+
+        log(`   Agendar prueba: Reserva OK AgendaDisponibleId=${agendaId || '?'}`);
+        log('   Agendar prueba: manejadorCreoCita…');
+
+        const rCreo = await postValidadorValidar({
+            Fuente: 'Validador',
+            Encontrado: false,
+            DetalleAdicional: 'manejadorCreoCita',
+            ObjetosEncontrados: [JSON.stringify(cita), token, true],
+            Recurso: recurso,
+        });
+
+        if (!rCreo.Encontrado) {
+            return {
+                ok: false,
+                paso: 'CreoCita',
+                error:
+                    'CreoCita Encontrado=false (' +
+                    (rCreo.DetalleAdicional || rCreo.MensajeAdicional || rCreo.ErrorString || '') +
+                    ')',
+                respuesta: rCreo,
+                reserva: rReserva,
+                paso2,
+            };
+        }
+
+        const objsCreo = Array.isArray(rCreo.ObjetosEncontrados) ? rCreo.ObjetosEncontrados : [];
+        const codigoCita = objsCreo[0];
+        const idInterno = objsCreo[1];
+        log(`   Agendar prueba: CreoCita OK codigo=${codigoCita} id=${idInterno}`);
+
+        return {
+            ok: true,
+            codigoCita,
+            idInterno,
+            slot: { contenido: horaLabel, idAgenda: agendaId, horaAgenda: cita.Hora },
+            fecha: paso2.fechaConsultada,
+            reserva: rReserva,
+            creo: rCreo,
+            paso2,
+        };
     }
 
     // Camino por clics (fallback o para sincronizar el DOM tras sondeo OK).
@@ -3246,6 +3382,51 @@
             }
         };
 
+        const botonAgendarPrueba = document.createElement('button');
+        botonAgendarPrueba.textContent = 'Agendar prueba';
+        botonAgendarPrueba.title =
+            'Fechas→Horas→Reserva→Creo con cédula clara y resto ****. Sin Validacion. Puede crear cita real.';
+        botonAgendarPrueba.style.cssText = boton.style.cssText;
+        const agCfg = p2Cfg.agendarPrueba || {};
+        botonAgendarPrueba.style.display =
+            p2Cfg.activo === false || agCfg.activo === false ? 'none' : '';
+        botonAgendarPrueba.onclick = async () => {
+            const doc = String((agCfg && agCfg.numeroDocumento) || '').trim();
+            const okConfirm = window.confirm(
+                '¿Agendar prueba por POST?\n\n' +
+                    'Cédula: ' +
+                    doc +
+                    '\nResto de datos: máscaras ****\nSin paso Validacion.\n\n' +
+                    'Puede crear una cita REAL en DIAN si el backend acepta.',
+            );
+            if (!okConfirm) return;
+            botonAgendarPrueba.disabled = true;
+            botonPaso2.disabled = true;
+            pintar('Agendar prueba: Fechas→Horas→Reserva→Creo…');
+            try {
+                const r = await probarAgendarConMascaras();
+                try {
+                    const win = vistaPagina();
+                    win.__ssAgendarPruebaUltimo = r;
+                } catch (_) {
+                    /* ignore */
+                }
+                if (!r.ok) {
+                    pintar(`Agendar prueba FALLÓ en ${r.paso || '?'}: ${r.error || 'sin detalle'}`);
+                } else {
+                    pintar(
+                        `Agendar prueba OK: cita ${r.codigoCita} · ${r.slot && r.slot.contenido} · ${r.fecha}`,
+                        true,
+                    );
+                }
+            } catch (e) {
+                pintar(`Agendar prueba error: ${(e && e.message) || e}`);
+            } finally {
+                botonAgendarPrueba.disabled = false;
+                botonPaso2.disabled = false;
+            }
+        };
+
         const $blobEstado = document.createElement('div');
         $blobEstado.style.cssText = 'margin:4px 0 0;color:#555;font-size:11px';
         refrescarEstadoBlob = () => {
@@ -3467,6 +3648,7 @@
         botones.append(
             boton,
             botonPaso2,
+            botonAgendarPrueba,
             botonExportar,
             botonSheet,
             botonBlob,

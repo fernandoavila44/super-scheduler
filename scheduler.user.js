@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Super Scheduler (sandbox)
 // @namespace    super-scheduler
-// @version      2.0-sandbox
+// @version      2.0.1-sandbox
 // @description  [SANDBOX] Agendamiento DIAN solo por ValidadorValidar (Fechas/Horas/Reserva/Creo). Sin clics.
 // @match        https://agendamiento.dian.gov.co/*
 // @run-at       document-idle
@@ -70,6 +70,15 @@
             bipsPorRafaga: 3,
             segundosEntreRafagas: 4,
             volumen: 0.28,
+        },
+
+        // Una sola vez al agendar (distinto de la alarma urgente).
+        sonidoExito: {
+            notas: [523.25, 659.25, 783.99], // Do–Mi–Sol
+            duracionNota: 0.16,
+            gap: 0.04,
+            tipo: 'triangle',
+            volumen: 0.22,
         },
     };
 
@@ -1089,6 +1098,75 @@
         pararTitulo();
     }
 
+    /** Arpegio Do–Mi–Sol una sola vez (éxito de cita). */
+    function tocarSonidoExito() {
+        const cfg = CONFIG.sonidoExito || {};
+        const notas = cfg.notas || [523.25, 659.25, 783.99];
+        const dur = Number(cfg.duracionNota) || 0.16;
+        const gap = Number(cfg.gap) || 0.04;
+        const vol = Number(cfg.volumen) || 0.22;
+        const tipo = cfg.tipo || 'triangle';
+        pararSonido();
+        let ctx = null;
+        try {
+            const AC = vistaPagina().AudioContext || vistaPagina().webkitAudioContext;
+            ctx = new AC();
+            if (ctx.resume) ctx.resume().catch(() => {});
+            let t = ctx.currentTime;
+            for (let i = 0; i < notas.length; i++) {
+                const osc = ctx.createOscillator();
+                const gan = ctx.createGain();
+                osc.type = tipo;
+                osc.frequency.value = notas[i];
+                gan.gain.setValueAtTime(0, t);
+                gan.gain.linearRampToValueAtTime(vol, t + 0.015);
+                gan.gain.setValueAtTime(vol, t + dur * 0.7);
+                gan.gain.linearRampToValueAtTime(0, t + dur);
+                osc.connect(gan).connect(ctx.destination);
+                osc.start(t);
+                osc.stop(t + dur + 0.02);
+                t += dur + gap;
+            }
+            const cierreMs = (notas.length * (dur + gap) + 0.4) * 1000;
+            const tid = setTimeout(() => {
+                if (ctx) ctx.close().catch(() => {});
+                pararSonido = () => {};
+            }, cierreMs);
+            pararSonido = () => {
+                clearTimeout(tid);
+                if (ctx) ctx.close().catch(() => {});
+                pararSonido = () => {};
+            };
+        } catch (e) {
+            log('sin audio éxito: ' + e.message);
+        }
+    }
+
+    /** Notifica cita agendada: título + sonido victoria (sin loop). */
+    function celebracionExito(cuerpo) {
+        pararTitulo();
+        const original = document.title.includes('CUPOS')
+            ? 'Agendamiento'
+            : document.title.includes('CITA OK')
+              ? 'Agendamiento'
+              : document.title;
+        document.title = '*** CITA OK ***';
+        let on = true;
+        const idTitulo = setInterval(() => {
+            document.title = (on = !on) ? '*** CITA OK ***' : original;
+        }, 900);
+        pararTitulo = () => {
+            clearInterval(idTitulo);
+            document.title = original;
+            pararTitulo = () => {};
+        };
+        tocarSonidoExito();
+        if (window.Notification && Notification.permission === 'granted') {
+            new Notification('Cita agendada', { body: cuerpo });
+        }
+    }
+
+    /** Alarma urgente (bips en loop). No usar para éxito de cita. */
     function alarma(cuerpo, opts = {}) {
         const conSonido = opts.sonido !== false;
         const conTitulo = opts.titulo !== false;
@@ -1143,7 +1221,7 @@
             log('sin audio: ' + e.message);
         }
         if (window.Notification && Notification.permission === 'granted') {
-            new Notification('Cita agendada', { body: cuerpo });
+            new Notification('Scheduler', { body: cuerpo });
         }
         pararSonido = () => {
             temporizadores.forEach(clearInterval);
@@ -1242,7 +1320,7 @@
 
             const msg = `Cita ${cita.codigoCita} · ${cita.hora} · ${cliente.cedula}`;
             log('OK ' + msg);
-            alarma(msg, { sonido: true });
+            celebracionExito(msg);
 
             const quedan = cargarClientes().filter((c) => !c.scheduled && clienteListoParaPost(c));
             if (quedan.length) {

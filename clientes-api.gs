@@ -60,9 +60,10 @@ function listar_(datos) {
       hour: hour,
     };
     // PII enmascarada (opcional): la escribe FormularioCitas al bajar del form.
+    // emailRut = correo enmascarado para POST. «email» es otra columna (post-agendar).
     if (ctx.iNombre >= 0) cliente.nombre = textoCelda_(fila[ctx.iNombre]);
     if (ctx.iApellido >= 0) cliente.apellido = textoCelda_(fila[ctx.iApellido]);
-    if (ctx.iEmail >= 0) cliente.email = textoCelda_(fila[ctx.iEmail]);
+    if (ctx.iEmailRut >= 0) cliente.email = textoCelda_(fila[ctx.iEmailRut]);
     // Compat: columna legacy "name" si no hay "nombre".
     if (!cliente.nombre && ctx.iName >= 0) cliente.nombre = textoCelda_(fila[ctx.iName]);
     if (ctx.iCelular >= 0) cliente.celular = textoCelda_(fila[ctx.iCelular]);
@@ -177,6 +178,7 @@ function hojaConIndices_(nombreHoja) {
     iNombre: headers.indexOf('nombre'),
     iApellido: headers.indexOf('apellido'),
     iEmail: headers.indexOf('email'),
+    iEmailRut: headers.indexOf('emailrut'),
     iCelular: headers.indexOf('celular'),
     iCola: headers.indexOf('cola'),
     iTipoPersona: headers.indexOf('tipopersona'),

@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Super Scheduler (sandbox)
 // @namespace    super-scheduler
-// @version      1.51-sandbox
-// @description  [SANDBOX] Appointment scheduling monitor
+// @version      1.52-sandbox
+// @description  [SANDBOX] Appointment scheduling monitor + prueba Paso2 Fechas/Horas
 // @match        https://agendamiento.dian.gov.co/*
 // @run-at       document-idle
 // @grant        GM_xmlhttpRequest
@@ -61,6 +61,22 @@
             // Techo del POST (responde antes → sigue al instante). 30s evita
             // caer a clics solo porque la red va lenta.
             timeoutMs: 30000,
+            // Sandbox: botón "Paso2 prueba" → Fechas + Horas (IdAgenda).
+            // No llama Reserva/Creo. Solo consulta IdentificadoresAgendas.
+            pruebaPaso2: {
+                activo: true,
+                idEspecialidad: 912,
+                // Nombre orientativo (HAR Colas); el id manda.
+                nombreCola: 'Barranquilla - Universidad del Atlántico',
+                tipoEspecialidad: '2',
+                tipoCliente: '1',
+                // InfoServicioWeb (Digiturno 5) — estable entre reloads.
+                infoServicioWeb:
+                    'B6gSx1jrtrvdoc4pcVdirINR7P8xoQ5IklP9PrUAsdSdu1c9ImEmjsrph3zrOh2yK2z5itWhmB4PdKiUNylhmc7QST68YbrSbB7rlug+9ObO+ffBIbtuB6cLBt8jdJ5IoNOsM3N2DO3d6foQ/uT/NaynHzR/nuKnVHbpiQLJF2t7ee5AqkYf8QgWris6up9KXNUgOiu0H7+aHT5EQhhWTlC/PK4lCMRMRfhikcGgZNnQRnnf6EKbX/nT+47aVi7X5zgKiPkFAv3EtojQIpLPLKGBT4bOeEOH8HOcUh4waXoA94sYwTh3Qy44XCCf9cPiUUDIHmAON9flWg2DxgdR+3YTV+1KF1DlKJWccbLsT8/HAZ/RQuqZe5j+68FOooIco8PpHSoWeA06qhwM/sTkwQO0U5E769EJExRnVY/lPW0PS5ijcTmy9sisHimhjEZJ',
+                // Fallback si no hay blob pegado/hook (mismo pack CitasDIAN del HAR).
+                blobEncriptado:
+                    'n6ch/SV/k+dI4u2UFdFZt/brXMA9zVn5kM201dC5IYv7J3PpQUXUWqySuM59vvO2Emx2PVFvYTtaJ7Rd6sSsRSlPtbn2zrNctjIsohWmnJHvHUPuBieiBA0jm0eX62xUQ+6BFWhtYjg1ePMyZSQYL79D2dZBRPWvmBFKvDrg50aJU/0Tsgpc2oALqH1hAXFJfBsx+jJJ6QvEZWmJH+3a/g==',
+            },
         },
 
         // URL /exec y nombre de pestaña (ciudad) no van en el repo: se guardan en
@@ -1968,6 +1984,7 @@
         if (configValidadorLista()) {
             if (origenBlobValidador === 'pegado') return 'Blob: pegado';
             if (origenBlobValidador === 'hook') return 'Blob: hook';
+            if (origenBlobValidador === 'prueba') return 'Blob: fallback prueba';
             return 'Blob: guardado';
         }
         return 'Blob: no';
@@ -2234,6 +2251,160 @@
             sinCupo: false,
             colas: Array.isArray(r4.ObjetosEncontrados) ? r4.ObjetosEncontrados : [],
         };
+    }
+
+    // Asegura blob para la prueba Paso2 (panel/hook o fallback hardcodeado).
+    function asegurarBlobParaPruebaPaso2() {
+        if (configValidadorLista()) return configValidador;
+        const p2 = (CONFIG.validador && CONFIG.validador.pruebaPaso2) || {};
+        const enc = String(p2.blobEncriptado || '').trim();
+        if (enc.length < 20) return null;
+        const minimo = {
+            ConfiguracionServicioRestEncriptado: enc,
+            ControlesGeolocalizacion: [],
+            FormatoCitas:
+                '{cita.codigo}    {cita.fecha}    {cita.Oficina.Nombre}    img/icono1.png    img/icono2.png    img/icono3.png',
+            IdPais: 1,
+            DistanciaMinima: 0,
+            TopOficinasCercanas: 0,
+            FormatoEncabezadoOficina: '',
+            FormatoOficina: '{0}',
+            ModoWebPlayer: true,
+            TipoPolitica: 0,
+            ObtenerEspecialidadesVirtuales: false,
+            ObtenerEspecialidadesPresenciales: false,
+            GenerarTurno: false,
+        };
+        persistirConfigValidador(minimo, 'prueba');
+        return configValidador;
+    }
+
+    function citaParaPruebaPaso2(fechaIso) {
+        const p2 = (CONFIG.validador && CONFIG.validador.pruebaPaso2) || {};
+        const tipo = String(p2.tipoCliente || '1');
+        const tipoVirt = String(p2.tipoEspecialidad || CONFIG.validador.tipoEspecialidadVirtual || '2');
+        const cita = plantillaCitaValidador(tipo, tipoVirt);
+        cita.Cola = {
+            IdEspecialidad: Number(p2.idEspecialidad) || 0,
+            Nombre: p2.nombreCola || null,
+        };
+        if (fechaIso) cita.Fecha = fechaIso;
+        return cita;
+    }
+
+    // Fechas (…T00:00:00Z) → Horas usa medianoche Colombia (…T05:00:00.000Z) en el HAR.
+    function fechaIsoParaHoras(iso) {
+        const s = String(iso || '');
+        if (/T00:00:00(\.000)?Z$/i.test(s)) {
+            return s.replace(/T00:00:00(\.000)?Z$/i, 'T05:00:00.000Z');
+        }
+        return s;
+    }
+
+    function deserializarObjValidador(valor) {
+        let v = valor;
+        if (typeof v === 'string') {
+            try {
+                v = JSON.parse(v);
+            } catch (_) {
+                return null;
+            }
+        }
+        return v;
+    }
+
+    // ObjetosEncontrados[0] puede ser lista, string JSON, o [[…]] (doble wrap).
+    function listaDesdeObjetosEncontrados(resp) {
+        const objs = resp && resp.ObjetosEncontrados;
+        if (!Array.isArray(objs) || !objs.length) return [];
+        let first = deserializarObjValidador(objs[0]);
+        if (first == null) return [];
+        if (Array.isArray(first) && first.length && Array.isArray(first[0])) {
+            first = first[0];
+        }
+        return Array.isArray(first) ? first : [first];
+    }
+
+    // Solo sandbox: Fechas → Horas. Devuelve { fechas, horas, error? }. No Reserva/Creo.
+    async function probarPaso2FechasHoras() {
+        const p2 = (CONFIG.validador && CONFIG.validador.pruebaPaso2) || {};
+        if (p2.activo === false) throw new Error('pruebaPaso2 desactivada en CONFIG');
+
+        if (!asegurarBlobParaPruebaPaso2()) {
+            throw new Error('sin blob (pega en panel o revisa blobEncriptado)');
+        }
+        const token = String(p2.infoServicioWeb || '').trim();
+        if (token.length < 40) throw new Error('falta infoServicioWeb en CONFIG.validador.pruebaPaso2');
+
+        const idEsp = Number(p2.idEspecialidad) || 0;
+        if (!idEsp) throw new Error('falta idEspecialidad en pruebaPaso2');
+
+        const recurso = (CONFIG.validador && CONFIG.validador.recurso) || 'CitasDIAN';
+        const citaFechas = citaParaPruebaPaso2(null);
+
+        log(`   Paso2 prueba: Fechas IdEspecialidad=${idEsp}`);
+        const rFechas = await postValidadorValidar({
+            Fuente: 'Validador',
+            Encontrado: false,
+            DetalleAdicional: 'manejadorEncontroFechas',
+            ObjetosEncontrados: [JSON.stringify(citaFechas), token, true],
+            Recurso: recurso,
+        });
+
+        if (!rFechas.Encontrado) {
+            return {
+                fechas: [],
+                horas: [],
+                error: 'Fechas: Encontrado=false (' + (rFechas.DetalleAdicional || '') + ')',
+            };
+        }
+
+        const fechasRaw = listaDesdeObjetosEncontrados(rFechas).filter(
+            (x) => typeof x === 'string' || (x && x.Fecha),
+        );
+        const fechas = fechasRaw.map((x) => (typeof x === 'string' ? x : x.Fecha)).filter(Boolean);
+        log(`   Paso2 prueba: ${fechas.length} fecha(s) → ${fechas.slice(0, 5).join(', ')}${fechas.length > 5 ? '…' : ''}`);
+
+        if (!fechas.length) {
+            return { fechas: [], horas: [], error: 'Fechas OK pero lista vacía' };
+        }
+
+        const fechaElegida = fechaIsoParaHoras(fechas[0]);
+        const citaHoras = citaParaPruebaPaso2(fechaElegida);
+
+        log(`   Paso2 prueba: Horas fecha=${fechaElegida}`);
+        const rHoras = await postValidadorValidar({
+            Fuente: 'Validador',
+            Encontrado: false,
+            DetalleAdicional: 'manejadorEncontroHoras',
+            ObjetosEncontrados: [JSON.stringify(citaHoras)],
+            Recurso: recurso,
+        });
+
+        if (!rHoras.Encontrado) {
+            return {
+                fechas,
+                horas: [],
+                fechaConsultada: fechaElegida,
+                error: 'Horas: Encontrado=false (' + (rHoras.DetalleAdicional || '') + ')',
+            };
+        }
+
+        const slots = listaDesdeObjetosEncontrados(rHoras).filter(
+            (h) => h && (h.IdentificadoresAgendas || h.HoraAgenda),
+        );
+        const horas = slots.map((h) => ({
+            contenido: h.Contenido || h.HoraAgenda || '',
+            horaAgenda: h.HoraAgenda || '',
+            idAgenda: h.IdentificadoresAgendas || '',
+            disponibles: h.NumeroAgendasDisponibles,
+        }));
+
+        horas.forEach((h, i) => {
+            log(`   Paso2 slot[${i}] ${h.contenido} → ${h.idAgenda}`);
+        });
+
+        return { fechas, fechaConsultada: fechaElegida, horas };
     }
 
     // Camino por clics (fallback o para sincronizar el DOM tras sondeo OK).
@@ -3021,7 +3192,9 @@
             'border-radius:8px;padding:10px 12px;font:12px/1.4 system-ui,sans-serif;box-shadow:0 2px 10px rgba(0,0,0,.25);max-width:320px';
 
         const titulo = document.createElement('strong');
-        titulo.textContent = 'Super Scheduler';
+        const p2Cfg = (CONFIG.validador && CONFIG.validador.pruebaPaso2) || {};
+        titulo.textContent =
+            p2Cfg.activo !== false ? 'Super Scheduler · Paso2 prueba' : 'Super Scheduler';
 
         $estado = document.createElement('div');
         $estado.style.margin = '6px 0';
@@ -3031,6 +3204,47 @@
 
         const boton = document.createElement('button');
         boton.style.cssText = 'cursor:pointer;padding:4px 10px;border:1px solid #666;border-radius:4px;background:#f3f3f3';
+
+        const botonPaso2 = document.createElement('button');
+        botonPaso2.textContent = 'Paso2 prueba';
+        botonPaso2.title =
+            'Fechas→Horas por Validador (IdEspecialidad de CONFIG). Solo consulta IdAgenda; no Reserva/Creo.';
+        botonPaso2.style.cssText = boton.style.cssText;
+        botonPaso2.style.display = p2Cfg.activo === false ? 'none' : '';
+        botonPaso2.onclick = async () => {
+            botonPaso2.disabled = true;
+            pintar('Paso2 prueba: consultando Fechas/Horas…');
+            try {
+                const r = await probarPaso2FechasHoras();
+                if (r.error) {
+                    pintar(`Paso2: ${r.error}`);
+                } else if (!r.horas || !r.horas.length) {
+                    pintar(
+                        `Paso2: fechas=${(r.fechas || []).length} pero sin horas ` +
+                            `(${r.fechaConsultada || '?'})`,
+                    );
+                } else {
+                    const preview = r.horas
+                        .slice(0, 3)
+                        .map((h) => `${h.contenido}:${String(h.idAgenda).slice(0, 8)}…`)
+                        .join(' · ');
+                    pintar(
+                        `Paso2 OK: ${r.horas.length} hora(s) el ${r.fechaConsultada || '?'} · ${preview}`,
+                        true,
+                    );
+                    try {
+                        const win = vistaPagina();
+                        win.__ssPaso2Ultimo = r;
+                    } catch (_) {
+                        /* ignore */
+                    }
+                }
+            } catch (e) {
+                pintar(`Paso2 error: ${(e && e.message) || e}`);
+            } finally {
+                botonPaso2.disabled = false;
+            }
+        };
 
         const $blobEstado = document.createElement('div');
         $blobEstado.style.cssText = 'margin:4px 0 0;color:#555;font-size:11px';
@@ -3252,6 +3466,7 @@
         refrescarBoton();
         botones.append(
             boton,
+            botonPaso2,
             botonExportar,
             botonSheet,
             botonBlob,

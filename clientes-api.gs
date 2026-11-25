@@ -50,7 +50,7 @@ function listar_(datos) {
       else if (rawTipo) tipoPersona = normalizarTipoPersona_(rawTipo);
     }
 
-    clientes.push({
+    var cliente = {
       cedula: String(cedula).replace(/\D/g, '') || String(cedula),
       ciudadTramite: String(ciudadTramite).trim(),
       cola: colaFila,
@@ -58,7 +58,15 @@ function listar_(datos) {
       scheduled: scheduled,
       date: date,
       hour: hour,
-    });
+    };
+    // PII enmascarada (opcional): la escribe FormularioCitas al bajar del form.
+    if (ctx.iNombre >= 0) cliente.nombre = textoCelda_(fila[ctx.iNombre]);
+    if (ctx.iApellido >= 0) cliente.apellido = textoCelda_(fila[ctx.iApellido]);
+    if (ctx.iEmail >= 0) cliente.email = textoCelda_(fila[ctx.iEmail]);
+    // Compat: columna legacy "name" si no hay "nombre".
+    if (!cliente.nombre && ctx.iName >= 0) cliente.nombre = textoCelda_(fila[ctx.iName]);
+    if (ctx.iCelular >= 0) cliente.celular = textoCelda_(fila[ctx.iCelular]);
+    clientes.push(cliente);
   }
 
   return json_({
@@ -166,7 +174,10 @@ function hojaConIndices_(nombreHoja) {
     iDate: headers.indexOf('date'),
     iHour: headers.indexOf('hour'),
     iName: headers.indexOf('name'),
+    iNombre: headers.indexOf('nombre'),
+    iApellido: headers.indexOf('apellido'),
     iEmail: headers.indexOf('email'),
+    iCelular: headers.indexOf('celular'),
     iCola: headers.indexOf('cola'),
     iTipoPersona: headers.indexOf('tipopersona'),
   };

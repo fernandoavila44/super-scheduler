@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Super Scheduler (sandbox)
 // @namespace    super-scheduler
-// @version      1.55-sandbox
-// @description  [SANDBOX] Agendar prueba: PII fija ofuscada (sin Validacion/captcha)
+// @version      2.0-sandbox
+// @description  [SANDBOX] Agendamiento DIAN solo por ValidadorValidar (Fechas/Horas/Reserva/Creo). Sin clics.
 // @match        https://agendamiento.dian.gov.co/*
 // @run-at       document-idle
 // @grant        GM_xmlhttpRequest
@@ -13,328 +13,65 @@
 // @updateURL    https://raw.githubusercontent.com/fernandoavila44/super-scheduler/sandbox/scheduler.user.js
 // ==/UserScript==
 //
-// sandbox = pruebas. master = oficial.
+// sandbox = POST (nueva vía). master = oficial con clics (no tocar desde aquí).
 //
 
 (function () {
     'use strict';
 
-    // ───────────────────────────── CONFIGURACIÓN ─────────────────────────────
-
-    // Respaldo vacío a propósito: no subir cédulas al repo. La cola vive en la Sheet.
-    // ciudadTramite: string o arreglo en orden de preferencia.
     const CLIENTES_INICIALES = [];
 
     const CONFIG = {
-        // Página donde arranca el flujo. Recarga completa solo en fallos duros
-        // o tras agotar reintentos suaves (sin cupo reutiliza el DOM).
-        // Player.aspx redirige a Default.aspx?Error=3; el recurso real es este.
         urlInicio: 'https://agendamiento.dian.gov.co',
 
-        // Sin cupo: cerrar modal y repetir desde Categoría sin recargar.
-        // Tras softMaxSeguidos fallos seguidos, o si no se puede volver a
-        // Categoría, se recarga la página (estado del player limpio).
         reintento: {
-            // Soft retries antes de hard refresh. El valor activo se elige en el
-            // panel (localStorage); si no hay selección → softMaxSeguidos (20).
             softMaxSeguidos: 20,
             softMaxOpciones: [10, 20, 30, 50, 100],
-            selCategoria:
-                'div.boton.btnCategoria[llave="63071985-f5bd-43fe-beed-38f64c97371b"]',
-            selAnterior: 'div[tipo="Control"][nombre="btnAnterior"]',
-            intentosAnterior: 6,
         },
 
-        // Sondeo rápido Inicio→colas vía ValidadorValidar (sin esperar el DOM).
-        // Blob: pegado en el panel (localStorage) o capturado por el hook del player.
-        // Si no hay blob, se usa el camino por clics.
         validador: {
-            activo: true,
             url: '/Player.aspx/ValidadorValidar',
             nombre: 'ValidadorDatos.CitasWeb',
             recurso: 'CitasDIAN',
-            // Devoluciones (llave + Código del JSON de categorías).
-            categoriaLlave: '63071985-f5bd-43fe-beed-38f64c97371b',
+            // Devoluciones
             categoriaCodigo: '13',
-            // Videoatención / Virtual.
             tipoEspecialidadVirtual: '2',
-            // Techo del POST (responde antes → sigue al instante). 30s evita
-            // caer a clics solo porque la red va lenta.
             timeoutMs: 30000,
-            // Sandbox: botón "Paso2 prueba" → Fechas + Horas (IdAgenda).
-            // No llama Reserva/Creo. Solo consulta IdentificadoresAgendas.
-            pruebaPaso2: {
-                activo: true,
-                idEspecialidad: 912,
-                // Nombre orientativo (HAR Colas); el id manda.
-                nombreCola: 'Barranquilla - Universidad del Atlántico',
-                tipoEspecialidad: '2',
-                tipoCliente: '1',
-                // InfoServicioWeb (Digiturno 5) — estable entre reloads.
-                infoServicioWeb:
-                    'B6gSx1jrtrvdoc4pcVdirINR7P8xoQ5IklP9PrUAsdSdu1c9ImEmjsrph3zrOh2yK2z5itWhmB4PdKiUNylhmc7QST68YbrSbB7rlug+9ObO+ffBIbtuB6cLBt8jdJ5IoNOsM3N2DO3d6foQ/uT/NaynHzR/nuKnVHbpiQLJF2t7ee5AqkYf8QgWris6up9KXNUgOiu0H7+aHT5EQhhWTlC/PK4lCMRMRfhikcGgZNnQRnnf6EKbX/nT+47aVi7X5zgKiPkFAv3EtojQIpLPLKGBT4bOeEOH8HOcUh4waXoA94sYwTh3Qy44XCCf9cPiUUDIHmAON9flWg2DxgdR+3YTV+1KF1DlKJWccbLsT8/HAZ/RQuqZe5j+68FOooIco8PpHSoWeA06qhwM/sTkwQO0U5E769EJExRnVY/lPW0PS5ijcTmy9sisHimhjEZJ',
-                // Fallback si no hay blob pegado/hook (mismo pack CitasDIAN del HAR).
-                blobEncriptado:
-                    'n6ch/SV/k+dI4u2UFdFZt/brXMA9zVn5kM201dC5IYv7J3PpQUXUWqySuM59vvO2Emx2PVFvYTtaJ7Rd6sSsRSlPtbn2zrNctjIsohWmnJHvHUPuBieiBA0jm0eX62xUQ+6BFWhtYjg1ePMyZSQYL79D2dZBRPWvmBFKvDrg50aJU/0Tsgpc2oALqH1hAXFJfBsx+jJJ6QvEZWmJH+3a/g==',
-                // Prueba: Fechas/Horas → Reserva/Creo con PII ofuscada fija (HAR).
-                // usarValidacion:false evita captcha; dirección solo máscara.
-                agendarPrueba: {
-                    activo: true,
-                    usarValidacion: false,
-                    numeroDocumento: '1049616173',
-                    idTipoDocumento: '2',
-                    nombre: 'M****L F******O',
-                    apellido: 'A***A F*****O',
-                    correo: 'zu******44@gm***.com',
-                    celular: '3000000088',
-                    direccion: '********************',
-                },
-            },
+            infoServicioWeb:
+                'B6gSx1jrtrvdoc4pcVdirINR7P8xoQ5IklP9PrUAsdSdu1c9ImEmjsrph3zrOh2yK2z5itWhmB4PdKiUNylhmc7QST68YbrSbB7rlug+9ObO+ffBIbtuB6cLBt8jdJ5IoNOsM3N2DO3d6foQ/uT/NaynHzR/nuKnVHbpiQLJF2t7ee5AqkYf8QgWris6up9KXNUgOiu0H7+aHT5EQhhWTlC/PK4lCMRMRfhikcGgZNnQRnnf6EKbX/nT+47aVi7X5zgKiPkFAv3EtojQIpLPLKGBT4bOeEOH8HOcUh4waXoA94sYwTh3Qy44XCCf9cPiUUDIHmAON9flWg2DxgdR+3YTV+1KF1DlKJWccbLsT8/HAZ/RQuqZe5j+68FOooIco8PpHSoWeA06qhwM/sTkwQO0U5E769EJExRnVY/lPW0PS5ijcTmy9sisHimhjEZJ',
+            blobEncriptado:
+                'n6ch/SV/k+dI4u2UFdFZt/brXMA9zVn5kM201dC5IYv7J3PpQUXUWqySuM59vvO2Emx2PVFvYTtaJ7Rd6sSsRSlPtbn2zrNctjIsohWmnJHvHUPuBieiBA0jm0eX62xUQ+6BFWhtYjg1ePMyZSQYL79D2dZBRPWvmBFKvDrg50aJU/0Tsgpc2oALqH1hAXFJfBsx+jJJ6QvEZWmJH+3a/g==',
+            direccionMascara: '********************',
+            idTipoDocumento: '2',
         },
 
-        // URL /exec y nombre de pestaña (ciudad) no van en el repo: se guardan en
-        // localStorage con el panel. Ver clientes-api.gs.
         sheet: {
             activo: true,
             url: '',
-            // Nombre exacto de la pestaña; vacío = se elige en el dropdown del panel.
             hoja: '',
-            // Opciones del dropdown (deben coincidir con los nombres de las pestañas).
             ciudades: ['Bogota', 'Medellin', 'Cali', 'Bucaramanga', 'Manizales'],
-            // Colas opcionales (columna "cola" en la Sheet). Vacío en el panel = toda la hoja.
             colas: ['A', 'B', 'C'],
             timeoutMs: 15000,
-            // La lista guardada se usa sin consultar la Sheet si tiene menos de
-            // esto; si es más vieja, se refresca en segundo plano sin frenar el ciclo.
             refrescoSegundos: 60,
-            // Más vieja que esto ya no se usa: el ciclo espera a la Sheet, para no
-            // reintentar a alguien que otro PC agendó mientras tanto.
             edadMaximaCacheSegundos: 300,
-            // Un agendado local más reciente que esto no se revierte aunque la
-            // Sheet todavía no lo refleje (su escritura puede ir en camino).
             proteccionAgendadoMs: 10 * 60 * 1000,
         },
 
-        // Tiempo entre ciclos cuando no hay cupo (o tras un fallo recuperable).
-        // El valor activo se elige en el dropdown del panel y se guarda en localStorage.
         intervaloSegundos: 30,
         intervalosSegundos: [5, 10, 15, 30, 45, 60],
-
-        // Tras agendar, si quedan clientes, espera esto y vuelve a empezar.
         segundosAntesDelSiguienteCliente: 0,
 
-        // Margen alto: el sitio a veces tarda en pintar controles.
-        timeoutElementoMs: 45000,
-
-        // Margen mínimo tras un paso si no define "espera" (la sincronía real
-        // la hace esperaHasta / esperarSinCarga, no este número).
-        pausaEntrePasosMs: 300,
-
-        // Tras un clic, si el siguiente control ya está listo, igual se deja
-        // respirar al player (transiciones ~0.75s a veces).
-        esperaTrasClicMs: 200,
-
-        // Splash / capa de carga del WebPlayer: no avanzar mientras estén visibles.
-        cargando: {
-            sels: ['#mpcWPdivCargando', '.splash', '#divSplash'],
-            timeoutMs: 15000,
-        },
-
-        // Pasos en el orden exacto en que se ejecutan.
-        // Formas admitidas:
-        //   { sel: '#boton',            desc: 'Iniciar' }                        -> clic
-        //   { sel: '.btn', contiene: 'Continuar', desc: 'Continuar' }            -> clic al que tenga ese texto
-        //   { sel: '#tipoDoc', valor: '1', desc: 'Tipo de documento' }           -> <select> por value
-        //   { sel: '#sedes', opcionContiene: 'Bogota' }                          -> abre el <select> y elige por texto
-        //   { sel: '#horas', primeraOpcion: true }                               -> abre el <select> y elige la primera con valor
-        //   { sel: '#numDoc', texto: '1234567890', desc: 'Documento' }           -> <input>
-        //   { accion: 'fechaYHora' }                                             -> calendario + horas con reintento
-        //   { accion: 'tramite' }                                                -> trámite según la cola de clientes
-        // Cada paso acepta: espera (ms), esperaHasta (sel o "a, b"), omitirSiMarcado,
-        // opcional: true (si falta, no aborta).
-        pasos: [
-            // Un solo tramo rápido: Agendar → persona → Videoatención → Devoluciones
-            // → select de trámite. Soft-retry puede entrar con desdeCategoria.
-            {
-                accion: 'caminoHastaTramite',
-                desc: 'Camino hasta trámite',
-                espera: 100,
-            },
-            // Elige al primer pendiente (mismo tipoPersona) cuya ciudad esté en opciones.
-            {
-                accion: 'tramite',
-                desc: 'Trámite del cliente',
-                esperaHasta:
-                    'div[tipo="Control"][pantalla="PasoUno"][nombre="btnSiguiente"]',
-                espera: 150,
-            },
-            // Hay un btnSiguiente por paso, más una variante btnSiguienteBlock que es
-            // la deshabilitada. Se apunta al del PasoUno y solo al habilitado.
-            {
-                sel: 'div[tipo="Control"][pantalla="PasoUno"][nombre="btnSiguiente"]',
-                desc: 'Siguiente (paso uno)',
-                esperaHasta:
-                    'div[tipo="Control"][pantalla="PasoDos"][nombre="btnFecha"]',
-                espera: 200,
-            },
-            // La fecha y la hora van juntas porque las horas dependen del día: si un
-            // día no tiene horas libres hay que volver al calendario y probar otro.
-            {
-                accion: 'fechaYHora',
-                desc: 'Fecha y hora',
-                esperaHasta:
-                    'div[tipo="Control"][pantalla="PasoDos"][nombre="btnSiguiente"]',
-                espera: 200,
-            },
-            {
-                sel: 'div[tipo="Control"][pantalla="PasoDos"][nombre="btnSiguiente"]',
-                desc: 'Siguiente (paso dos)',
-                // No esperar #g-recaptcha-response aquí: va display:none y bloqueaba
-                // el paso del captcha (alarma / título CUPOS / AHK) hasta 45 s o más.
-                espera: 300,
-            },
-            // La alarma y CUPOS ya salieron al elegir fecha y hora.
-            { accion: 'captcha', desc: 'Captcha (manual)' },
-            // Tipo + número: se mantienen aunque el captcha caduque. El número
-            // solo aparece con captcha resuelto; la consulta va al salir del campo.
-            {
-                accion: 'documento',
-                desc: 'Número de documento',
-                esperaHasta:
-                    'div[nombrecontrol="DatosCorretos"] input[type="radio"][value="1"]',
-                espera: 200,
-            },
-            {
-                sel: 'div[nombrecontrol="DatosCorretos"] input[type="radio"][value="1"]',
-                marcar: true,
-                omitirSiMarcado: true,
-                desc: 'Datos correctos: Sí',
-                esperaHasta:
-                    'div[nombrecontrol="TerminosCondiciones"] input[type="checkbox"]',
-                espera: 150,
-            },
-            {
-                sel: 'div[nombrecontrol="TerminosCondiciones"] input[type="checkbox"]',
-                marcar: true,
-                omitirSiMarcado: true,
-                desc: 'Aceptar tratamiento de datos',
-                esperaHasta:
-                    'div[tipo="Control"][pantalla="PasoTres"][nombre="btnSiguiente"]',
-                espera: 150,
-            },
-            {
-                sel: 'div[tipo="Control"][pantalla="PasoTres"][nombre="btnSiguiente"]',
-                desc: 'Siguiente (paso tres)',
-                esperaHasta:
-                    'div[tipo="Control"][pantalla="PasoCuatro"][nombre="btnAgendarCita"]',
-                espera: 200,
-            },
-            // Clic en Agendar: ModalInfoCita (éxito) o ModalError de máximo de citas
-            // (cliente ya agendó por su cuenta → scheduled sin date/hour).
-            { accion: 'agendarCita', desc: 'Agendar cita' },
-        ],
-
-        // Selectores del par calendario + horas del PasoDos.
-        fechaYHora: {
-            selBoton: 'div[tipo="Control"][pantalla="PasoDos"][nombre="btnFecha"]',
-            // El calendario vive siempre en el DOM; su tabla visible es la señal
-            // de que está desplegado.
-            selAbierto: 'div[nombrecontrol="Calendario"] table.k-calendar-table',
-            // Kendo marca con k-disabled los días sin cupo. k-other-month son días
-            // del mes anterior/siguiente visibles en esta hoja (p. ej. noviembre
-            // al final de octubre): si están habilitados, sí se toman.
-            selDia:
-                'div[nombrecontrol="Calendario"] td.k-calendar-td:not(.k-disabled):not(.k-state-disabled) a.k-link',
-            selMesSiguiente:
-                'div[nombrecontrol="Calendario"] .k-nav-next, div[nombrecontrol="Calendario"] .k-calendar-nav-next',
-            selHoras: 'div[nombrecontrol="Horas"] select.customSelect',
-            // Solo se muestra habilitado cuando el player aceptó la hora.
-            selSiguiente: 'div[tipo="Control"][pantalla="PasoDos"][nombre="btnSiguiente"]',
-            // Tope del paso entero: la página lenta puede tardar minutos en pintar
-            // días u horas; no se declara "sin cupo" antes de agotar esto.
-            timeoutPasoMs: 5 * 60 * 1000,
-            // Cuánto esperar a que el calendario se despliegue tras el clic.
-            timeoutCalendarioMs: 60000,
-            // Cuánto esperar a que el calendario pinte días habilitados.
-            timeoutDiasMs: 5 * 60 * 1000,
-            // Cuánto esperar las horas de un día antes de descartarlo y probar el
-            // siguiente. Margen alto: a veces el texto aparece antes que el value.
-            timeoutHorasMs: 5 * 60 * 1000,
-            // Tras elegir la hora, cuánto esperar la confirmación del player
-            // (hora seleccionada o Siguiente habilitado) antes de reintentar.
-            confirmarHoraMs: 15000,
-            // Veces que se vuelve a aplicar la hora si el player rehízo el select.
-            intentosHora: 8,
-        },
-
-        captcha: {
-            // reCAPTCHA escribe su token en este textarea de la propia página al
-            // marcar la casilla: es la señal fiable de que ya está resuelto.
-            selToken: '#g-recaptcha-response',
-            // Margen para que llegues al navegador y lo marques.
-            timeoutMs: 10 * 60 * 1000,
-        },
-
-        // PasoTres: el player vacía tipo/número cuando el captcha caduca o la
-        // consulta tarda. El script los vuelve a poner en cada sondeo.
-        documento: {
-            selTipo: 'div[nombrecontrol="TipoDocumento"] select.customSelect',
-            // Texto de la opción (sin tildes; normalizar() las quita al comparar).
-            tipoContiene: 'cedula de ciudadania',
-            selNumero: '#divPasoTresNumeroDocumento input',
-            // Solo se repone el tipo si el player lo vació; no reconsultar cada tick.
-            reaplicarMs: 2500,
-            // Espera máxima a que aparezca DatosCorretos tras el blur de la cédula.
-            timeoutConsultaMs: 90000,
-        },
-
-        // Pasos posteriores al captcha: la cita ya está a la vista y recargar la
-        // perdería, así que en vez de abortar se insiste y luego se pide ayuda.
-        faseFinal: {
-            // Si un clic no hace avanzar la página en este tiempo, se repite.
-            // Mientras se ve la capa de carga no cuenta como "no avanzó".
-            reintentoMs: 8000,
-            // Cuánto se insiste solo antes de hacer sonar la alarma.
-            timeoutMs: 90000,
-            // Cuánto se espera a que la persona lo destrabe tras la alarma.
-            esperaPersonaMs: 5 * 60 * 1000,
-            // Veces que se reescribe el documento si su consulta no responde.
-            intentosDocumento: 3,
-        },
-
-        alarma: {
-            bipsPorRafaga: 6,
-            // La alarma se repite hasta que marcas el captcha, no suena una sola vez.
-            segundosEntreRafagas: 12,
-            // 0 a 1. Intermedio: audible sin obligar a bajar el volumen del PC.
-            volumen: 0.28,
-        },
-
-        // Tras Agendar: el cliente ya tiene cita (agendó por fuera). Se marca
-        // scheduled sin date/hour y se sigue con el siguiente, sin alarma.
-        // Única excepción de ModalError que NO se trata como "cerrar y reintentar".
         textosClienteConCita: [
             'El usuario excedió el número máximo de citas por día para el mismo servicio',
             'El usuario excedió el número máximo de citas solicitadas abiertas',
         ],
 
-        // El player bloquea la petición: Aceptar deja la página trabada, recargar.
-        // Segunda excepción de ModalError (recarga, no solo Aceptar).
-        textoBloqueoSeguridad: 'solicitud bloqueada por controles de seguridad',
-
-        sinEspecialidades: {
-            // Cualquier ModalError usa este Aceptar; el texto del aviso es dinámico
-            // y ya no se clasifica (salvo max citas / bloqueo seguridad).
-            selAceptar: 'div[tipo="Control"][pantalla="ModalError"][nombre="btnAceptar"]',
-            selServicios: 'div[nombrecontrol="Servicios"] select.customSelect',
-            // Si Servicios ya tiene opciones se sale al momento; si no, se espera
-            // el ModalError (o el timeout) sin gastar 4 s fijos en cada ciclo bueno.
-            timeoutMs: 3000,
+        alarma: {
+            bipsPorRafaga: 3,
+            segundosEntreRafagas: 4,
+            volumen: 0.28,
         },
     };
-
-    // ─────────────────────────── ESTADO PERSISTENTE ───────────────────────────
-    // Vive en localStorage: hace falta si hay recarga; el reintento suave no recarga.
 
     const CLAVE = 'ssMonitorState';
     const CLAVE_CLIENTES = 'ssMonitorClientes';
@@ -343,25 +80,27 @@
     const CLAVE_COLA = 'ssSheetCola';
     const CLAVE_INTERVALO = 'ssIntervaloSegundos';
     const CLAVE_SOFT_MAX = 'ssSoftMaxSeguidos';
-    // Blob Validador (JSON de configuracion). Solo en este navegador.
     const CLAVE_VALIDADOR_BLOB = 'ssValidadorBlob';
-    // Últimas líneas de diagnóstico (consola + localStorage). No es un archivo.
     const CLAVE_LOG = 'ssMonitorLog';
 
-    // Contador en memoria: el soft-retry no recarga, así que no hace falta persistirlo.
     let softSeguidos = 0;
     let timerReintento = null;
+    let clienteActual = null;
+    let configValidador = null;
+    let origenBlobValidador = '';
+    let hookValidadorListo = false;
+    let refrescarEstadoBlob = () => {};
+    let $panel = null;
+    let $estado = null;
+    let refrescarBoton = () => {};
+    let pararSonido = () => {};
+    let pararTitulo = () => {};
 
-    // URL del Apps Script: CONFIG.sheet.url (vacío en git) o localStorage local.
+    const vistaPagina = () => (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window);
     const urlSheet = () => (CONFIG.sheet.url || localStorage.getItem(CLAVE_SHEET_URL) || '').trim();
-
-    // Nombre de la pestaña / ciudad a la que apunta este PC.
     const nombreHoja = () => (CONFIG.sheet.hoja || localStorage.getItem(CLAVE_HOJA) || '').trim();
-
-    // Cola dentro de la ciudad (A/B/C). Vacío = toda la hoja (comportamiento anterior).
     const nombreCola = () => (localStorage.getItem(CLAVE_COLA) || '').trim();
 
-    // Periodicidad del reintento (dropdown del panel → localStorage).
     function intervaloSegundos() {
         const permitidos = CONFIG.intervalosSegundos || [5, 10, 15, 30, 45, 60];
         const guardado = Number(localStorage.getItem(CLAVE_INTERVALO));
@@ -371,7 +110,6 @@
     }
     const intervaloMs = () => intervaloSegundos() * 1000;
 
-    // Soft retries antes de hard refresh (dropdown del panel → localStorage).
     function softMaxSeguidos() {
         const rein = CONFIG.reintento || {};
         const permitidos = rein.softMaxOpciones || [10, 20, 30, 50, 100];
@@ -386,7 +124,6 @@
         return permitidos.includes(def) ? def : 20;
     }
 
-    // Caché por ciudad (+ cola) para no mezclar Bogotá A con Bogotá B ni con Medellín.
     const claveClientes = () => {
         const hoja = nombreHoja();
         if (!hoja) return CLAVE_CLIENTES;
@@ -394,16 +131,12 @@
         return cola ? `${CLAVE_CLIENTES}:${hoja}:${cola}` : `${CLAVE_CLIENTES}:${hoja}`;
     };
 
-    // Cliente cuyo trámite se eligió en este ciclo. Su cédula se usa en el PasoTres
-    // y se marca agendado cuando aparece el modal de éxito.
-    let clienteActual = null;
-    // Hora aceptada en PasoDos: el player a veces vacía el select después;
-    // se reaplica hasta pulsar Siguiente.
-    let horaElegida = null;
-    // '1' natural / '2' jurídica elegida en este ciclo (antes del trámite).
-    let tipoPersonaCiclo = '1';
+    const claveSync = () => {
+        const hoja = nombreHoja();
+        const cola = nombreCola();
+        return cola ? `ssSheetSyncAt:${hoja}:${cola}` : `ssSheetSyncAt:${hoja}`;
+    };
 
-    // Columna tipoPersona: 1 = natural, 2 = jurídica. Vacío o ausente → 1.
     function normalizarTipoPersonaCliente(v) {
         const s = String(v == null ? '' : v)
             .trim()
@@ -424,7 +157,6 @@
         localStorage.setItem(CLAVE, JSON.stringify(nuevo));
         return nuevo;
     };
-
     const guardarClientes = (lista) => localStorage.setItem(claveClientes(), JSON.stringify(lista));
 
     function leerClientesGuardados() {
@@ -436,7 +168,6 @@
         }
     }
 
-    // ciudadTramite: arreglo ya listo, texto, varios separados por |, o JSON ["a","b"].
     function parseCiudadTramite(raw) {
         if (Array.isArray(raw)) return raw.map((x) => String(x).trim()).filter(Boolean);
         const s = String(raw == null ? '' : raw).trim();
@@ -446,7 +177,7 @@
                 const arr = JSON.parse(s);
                 if (Array.isArray(arr)) return arr.map((x) => String(x).trim()).filter(Boolean);
             } catch {
-                /* texto normal */
+                /* texto */
             }
         }
         if (s.includes('|')) return s.split('|').map((x) => x.trim()).filter(Boolean);
@@ -468,12 +199,15 @@
         const scheduled = parseScheduled(c.scheduled);
         const fecha = (c.date || (c.cita && c.cita.fecha) || '').toString().trim();
         const hora = (c.hour || (c.cita && c.cita.hora) || '').toString().trim();
-        const tipoPersona = normalizarTipoPersonaCliente(c.tipoPersona);
         const entrada = {
             cedula: /^\d+$/.test(cedula) ? Number(cedula) : c.cedula,
             ciudadTramite,
-            tipoPersona,
+            tipoPersona: normalizarTipoPersonaCliente(c.tipoPersona),
             scheduled,
+            nombre: String(c.nombre || c.name || '').trim(),
+            apellido: String(c.apellido || '').trim(),
+            email: String(c.email || c.correo || '').trim(),
+            celular: String(c.celular || c.phone || '').trim(),
         };
         if (fecha || hora || (c.cita && c.cita.tramite)) {
             entrada.cita = {
@@ -486,8 +220,6 @@
         return entrada;
     }
 
-    // La Sheet es la fuente de verdad de scheduled/date/hour.
-    // localStorage solo cachea la última sincronización (y respaldo si falla la red).
     function agendadoReciente(c) {
         if (!c || !c.scheduled || !c.cita || !c.cita.agendadoEn) return false;
         const edad = Date.now() - Date.parse(c.cita.agendadoEn);
@@ -497,7 +229,6 @@
     function fusionarClientes(base, { sheetManda = false } = {}) {
         const guardados = leerClientesGuardados();
         const porCedula = new Map(guardados.map((c) => [String(c.cedula), c]));
-
         const lista = base
             .map((c) => normalizarClienteRemoto(c))
             .filter((c) => c && c.cedula != null && c.ciudadTramite)
@@ -505,11 +236,18 @@
                 const previo = porCedula.get(String(c.cedula));
                 if (sheetManda) {
                     if (!c.scheduled && agendadoReciente(previo)) {
-                        return { ...c, scheduled: true, cita: previo.cita, name: previo.name, email: previo.email };
+                        return {
+                            ...c,
+                            scheduled: true,
+                            cita: previo.cita,
+                            nombre: c.nombre || previo.nombre,
+                            apellido: c.apellido || previo.apellido,
+                            email: c.email || previo.email,
+                            celular: c.celular || previo.celular,
+                        };
                     }
                     return c;
                 }
-                // Respaldo local / CLIENTES_INICIALES: conservar scheduled local.
                 const entrada = {
                     ...c,
                     scheduled: !!(c.scheduled || (previo && previo.scheduled)),
@@ -517,7 +255,6 @@
                 if (!entrada.cita && previo && previo.cita) entrada.cita = previo.cita;
                 return entrada;
             });
-
         guardarClientes(lista);
         return lista;
     }
@@ -573,7 +310,6 @@
         });
     }
 
-    // GET con action=schedule (más fiable que POST con los redirects de Apps Script).
     function actualizarClienteSheet({ cedula, date, hour, name, email, scheduled = true }) {
         const base = urlSheet();
         const hoja = nombreHoja();
@@ -591,18 +327,14 @@
             email: email || '',
         });
         return gmRequest({ method: 'GET', url: base + sep + qs.toString() }).then((data) => {
-            if (!data || data.ok === false) throw new Error((data && data.error) || 'la Sheet rechazó la actualización');
+            if (!data || data.ok === false) {
+                throw new Error((data && data.error) || 'la Sheet rechazó la actualización');
+            }
             return data;
         });
     }
 
-    const claveSync = () => {
-        const hoja = nombreHoja();
-        const cola = nombreCola();
-        return cola ? `ssSheetSyncAt:${hoja}:${cola}` : `ssSheetSyncAt:${hoja}`;
-    };
     let refrescoEnCurso = false;
-
     function refrescarSheetEnFondo() {
         if (refrescoEnCurso) return;
         refrescoEnCurso = true;
@@ -611,1252 +343,57 @@
                 if (!remotos.length) return;
                 fusionarClientes(remotos, { sheetManda: true });
                 localStorage.setItem(claveSync(), String(Date.now()));
-                log(`Sheet refrescada en segundo plano (${remotos.filter((c) => !c.scheduled).length} pendiente(s))`);
+                log(
+                    `Sheet refrescada (${remotos.filter((c) => !c.scheduled).length} pendiente(s))`,
+                );
             })
-            .catch((e) => log(`refresco de la Sheet falló: ${e.message}`))
+            .catch((e) => log('Sheet fondo: ' + e.message))
             .finally(() => {
                 refrescoEnCurso = false;
             });
     }
 
-    // Al inicio de cada ciclo. Si la Sheet falla, se usa la última caché local
-    // (nunca CLIENTES_INICIALES vacío: eso hacía creer que "todos están agendados").
-    // confiable=true solo cuando la Sheet respondió bien: solo entonces FinCola.
-    // Con pendientes en la caché no se espera a la Sheet: se usa la caché y, si
-    // está vieja, se refresca en segundo plano para el ciclo siguiente.
     async function sincronizarClientes() {
-        const cache = leerClientesGuardados();
-        const { activo } = CONFIG.sheet;
-        const url = urlSheet();
-        const hoja = nombreHoja();
-
-        if (!activo || !url) {
-            if (cache.length) {
-                log(`Sheet sin URL; se usa caché local (${cache.length} clientes)`);
-                return { clientes: cache, confiable: false };
-            }
-            const lista = fusionarClientes(CLIENTES_INICIALES);
-            return { clientes: lista, confiable: false };
+        const { activo, edadMaximaCacheSegundos, refrescoSegundos } = CONFIG.sheet;
+        if (!activo) {
+            if (CLIENTES_INICIALES.length) fusionarClientes(CLIENTES_INICIALES);
+            return cargarClientes();
         }
-
-        if (!hoja) {
-            throw new Error('elige la ciudad en el dropdown del panel');
+        const cache = cargarClientes();
+        const syncAt = Number(localStorage.getItem(claveSync()) || 0);
+        const edad = syncAt ? Date.now() - syncAt : Infinity;
+        if (cache.some((c) => !c.scheduled) && edad < edadMaximaCacheSegundos * 1000) {
+            if (edad >= refrescoSegundos * 1000) refrescarSheetEnFondo();
+            return cache;
         }
-
-        const edad = Date.now() - Number(localStorage.getItem(claveSync()) || 0);
-        if (cache.some((c) => !c.scheduled) && edad < CONFIG.sheet.edadMaximaCacheSegundos * 1000) {
-            if (edad >= CONFIG.sheet.refrescoSegundos * 1000) refrescarSheetEnFondo();
-            return { clientes: cache, confiable: false };
-        }
-
         try {
             const remotos = await pedirClientesSheet();
-            if (!remotos.length) {
-                if (cache.length) {
-                    log(`Hoja "${hoja}"${nombreCola() ? ` cola ${nombreCola()}` : ''} vacía; se conserva la caché local`);
-                    return { clientes: cache, confiable: false };
-                }
-                return { clientes: [], confiable: true };
-            }
-            const pendientes = remotos.filter((c) => !c.scheduled).length;
-            const etiquetaCola = nombreCola() ? ` cola ${nombreCola()}` : '';
-            log(`Hoja "${hoja}"${etiquetaCola}: ${remotos.length} cliente(s), ${pendientes} pendiente(s)`);
             localStorage.setItem(claveSync(), String(Date.now()));
-            return {
-                clientes: fusionarClientes(remotos, { sheetManda: true }),
-                confiable: true,
-            };
-        } catch (e) {
-            if (cache.length) {
-                log(`Sheet falló (${e.message}); se usa caché local (${cache.length} clientes)`);
-                return { clientes: cache, confiable: false };
-            }
-            throw new Error(`no se pudo leer la Sheet y no hay caché local: ${e.message}`);
-        }
-    }
-
-    function textoPasoCuatro(nombre) {
-        const el = document.querySelector(`div[tipo="Control"][pantalla="PasoCuatro"][nombre="${nombre}"]`);
-        if (!el) return '';
-        return ((el.innerText || el.textContent || '').replace(/\s+/g, ' ')).trim();
-    }
-
-    // Nombre y correo tal como los muestra el PasoCuatro (ofuscados por habeas
-    // data). Se leen antes de Agendar, mientras la pantalla está visible.
-    let datosPersonaActual = { nombre: '', correo: '' };
-
-    function leerDatosPersona() {
-        return {
-            nombre: textoPasoCuatro('txtInfoNombres'),
-            correo: textoPasoCuatro('txtInfoCorreo'),
-        };
-    }
-
-    // El resumen de la cita vive en el PasoCuatro; al llegar al modal de éxito
-    // esas pantallas siguen en el DOM.
-    function leerResumenCita() {
-        return {
-            fecha: textoPasoCuatro('txtInfoFecha'),
-            hora: textoPasoCuatro('txtInfoHora'),
-            tramite: textoPasoCuatro('txtInfoServicio'),
-            agendadoEn: new Date().toISOString(),
-        };
-    }
-
-    async function marcarAgendado(opts = {}) {
-        if (!clienteActual) return;
-        const lista = cargarClientes();
-        const cliente = lista.find((c) => String(c.cedula) === String(clienteActual.cedula));
-        if (!cliente) return;
-
-        const sinFechaHora = !!opts.sinFechaHora;
-        const cita = sinFechaHora
-            ? {
-                  fecha: '',
-                  hora: '',
-                  tramite: (cliente.ciudadTramite || '').toString(),
-                  agendadoEn: new Date().toISOString(),
-                  motivo: opts.motivo || 'max_citas_dia',
-              }
-            : leerResumenCita();
-
-        const persona = datosPersonaActual.nombre || datosPersonaActual.correo
-            ? datosPersonaActual
-            : leerDatosPersona();
-        cliente.scheduled = true;
-        cliente.cita = cita;
-        cliente.name = persona.nombre;
-        cliente.email = persona.correo;
-        if (sinFechaHora) {
-            cliente.date = '';
-            cliente.hour = '';
-        }
-        guardarClientes(lista);
-        log(
-            sinFechaHora
-                ? `   ${cliente.cedula} marcado scheduled (sin date/hour): ${opts.motivo || 'ya tenía cita'}`
-                : `   ${cliente.cedula} agendado: ${cita.fecha || '?'} ${cita.hora || '?'} — ${
-                      cita.tramite || cliente.ciudadTramite
-                  }`,
-        );
-
-        const payload = {
-            cedula: cliente.cedula,
-            scheduled: true,
-            date: sinFechaHora ? '' : cita.fecha,
-            hour: sinFechaHora ? '' : cita.hora,
-            name: persona.nombre,
-            email: persona.correo,
-        };
-        let ultimoError = '';
-        for (let intento = 1; intento <= 3; intento++) {
-            try {
-                await actualizarClienteSheet(payload);
-                log(
-                    sinFechaHora
-                        ? '   Sheet actualizada (scheduled=true, date/hour vacíos, name/email)'
-                        : '   Sheet actualizada (scheduled/date/hour/name/email)',
-                );
-                ultimoError = '';
-                break;
-            } catch (e) {
-                ultimoError = e.message;
-                log(`   Sheet intento ${intento}/3 falló: ${e.message}`);
-                if (intento < 3) await dormir(800 * intento);
-            }
-        }
-        if (ultimoError) {
-            log('   no se pudo actualizar la Sheet tras reintentos: ' + ultimoError);
-            pintar(`Cita local OK; Sheet falló: ${ultimoError}`, false);
-        }
-    }
-
-    function exportarCitas() {
-        const agendados = cargarClientes().filter((c) => c.scheduled);
-        if (!agendados.length) {
-            pintar('No hay citas agendadas para exportar.');
-            return;
-        }
-        const blob = new Blob([JSON.stringify(agendados, null, 2)], { type: 'application/json' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `citas-${new Date().toISOString().slice(0, 10)}.json`;
-        a.click();
-        URL.revokeObjectURL(url);
-        pintar(`Exportadas ${agendados.length} cita(s).`);
-    }
-
-    // ───────────────────────────── UTILIDADES DOM ─────────────────────────────
-
-    // El flujo llegó al final y simplemente no había nada: es un resultado
-    // esperado, no un fallo del script, y el ciclo lo reporta distinto.
-    class SinCupo extends Error {
-        constructor(mensaje) {
-            super(mensaje);
-            this.name = 'SinCupo';
-        }
-    }
-
-    // La cola se acabó: no tiene sentido seguir recargando.
-    class FinCola extends Error {
-        constructor(mensaje) {
-            super(mensaje);
-            this.name = 'FinCola';
-        }
-    }
-
-    // Agendar devolvió el tope diario: se marca scheduled y se pasa al siguiente.
-    class ClienteYaAgendado extends Error {
-        constructor(mensaje) {
-            super(mensaje);
-            this.name = 'ClienteYaAgendado';
-        }
-    }
-
-    const esSinCupo = (e) => !!(e && (e instanceof SinCupo || e.name === 'SinCupo'));
-    const esFinCola = (e) => !!(e && (e instanceof FinCola || e.name === 'FinCola'));
-    const esClienteYaAgendado = (e) =>
-        !!(e && (e instanceof ClienteYaAgendado || e.name === 'ClienteYaAgendado'));
-
-    class BloqueoSeguridad extends Error {
-        constructor(mensaje) {
-            super(mensaje);
-            this.name = 'BloqueoSeguridad';
-        }
-    }
-    const esBloqueoSeguridad = (e) =>
-        !!(e && (e instanceof BloqueoSeguridad || e.name === 'BloqueoSeguridad'));
-
-    const dormir = (ms) => new Promise((r) => setTimeout(r, ms));
-
-    const visible = (el) => !!(el && el.offsetParent !== null);
-
-    // offsetParent falla con algunos contenedores del player; rect + computedStyle.
-    function visibleEnPantalla(el) {
-        if (!el) return false;
-        if (visible(el)) return true;
-        const st = estiloDe(el);
-        if (st && (st.display === 'none' || st.visibility === 'hidden' || Number(st.opacity) === 0)) {
-            return false;
-        }
-        const r = el.getBoundingClientRect();
-        return r.width > 0 && r.height > 0;
-    }
-
-    const vistaPagina = () => (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window);
-
-    // Sin tildes, sin mayúsculas y con los espacios colapsados, para que
-    // "Bogotá - Univ. La Gran Colombia" case con "Bogota".
-    const normalizar = (s) =>
-        s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
-
-    // Las opciones del trámite vienen entre comillas y a veces con un punto final.
-    // Se las quita para compararlas con ciudadTramite.
-    const limpiarTramite = (s) => normalizar(String(s)).replace(/["“”«»'`´.]/g, '').replace(/\s+/g, ' ').trim();
-
-    function estiloDe(el) {
-        try {
-            return vistaPagina().getComputedStyle(el);
-        } catch (_) {
-            return null;
-        }
-    }
-
-    // Modales del player usan position:absolute + display:none; offsetParent no
-    // basta. Se mira display/visibility del [tipo=Pantalla].
-    function pantallaOverlayVisible(nombre) {
-        const pantalla = document.querySelector(
-            `div[nombrepantalla="${nombre}"] [tipo="Pantalla"][nombre="${nombre}"]`,
-        );
-        if (!pantalla) return false;
-        const st = estiloDe(pantalla);
-        if (st) return st.display !== 'none' && st.visibility !== 'hidden';
-        const inline = pantalla.getAttribute('style') || '';
-        if (/display\s*:\s*none/i.test(inline)) return false;
-        return pantalla.style.display !== 'none';
-    }
-
-    function estaCargando() {
-        const sels = (CONFIG.cargando && CONFIG.cargando.sels) || ['#mpcWPdivCargando'];
-        for (const sel of sels) {
-            const el = document.querySelector(sel);
-            if (!el) continue;
-            if (el.classList && el.classList.contains('contenidoOculto')) continue;
-            const st = estiloDe(el);
-            if (st) {
-                if (st.display === 'none' || st.visibility === 'hidden' || st.opacity === '0') continue;
-                if (el.offsetWidth > 0 || el.offsetHeight > 0 || st.display === 'flex' || st.display === 'block') {
-                    return true;
-                }
-            } else if (visible(el)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    function textoModalErrorVisible() {
-        if (!pantallaOverlayVisible('ModalError')) return '';
-        const modal = document.querySelector('div[nombrepantalla="ModalError"]');
-        return normalizar((modal && modal.innerText) || '');
-    }
-
-    function textoModalErrorCrudo() {
-        if (!pantallaOverlayVisible('ModalError')) return '';
-        const modal = document.querySelector('div[nombrepantalla="ModalError"]');
-        return ((modal && modal.innerText) || '').replace(/\s+/g, ' ').trim();
-    }
-
-    // Devuelve el aviso de "cliente ya tiene cita" que esté en pantalla, o ''.
-    function hayModalMaxCitasDia() {
-        const texto = textoModalErrorVisible();
-        if (!texto) return '';
-        return (CONFIG.textosClienteConCita || []).find((t) => texto.includes(normalizar(t))) || '';
-    }
-
-    function hayModalBloqueoSeguridad() {
-        const aviso = normalizar(CONFIG.textoBloqueoSeguridad || '');
-        if (!aviso) return false;
-        return textoModalErrorVisible().includes(aviso);
-    }
-
-    // No se pulsa Aceptar: deja el player trabado. Recarga y el arranque sigue.
-    function recargarSiBloqueoSeguridad() {
-        if (!hayModalBloqueoSeguridad()) return;
-        recargarInicio('solicitud bloqueada por controles de seguridad');
-        throw new BloqueoSeguridad('solicitud bloqueada por controles de seguridad');
-    }
-
-    async function cerrarModalError() {
-        const sel =
-            (CONFIG.sinEspecialidades && CONFIG.sinEspecialidades.selAceptar) ||
-            'div[tipo="Control"][pantalla="ModalError"][nombre="btnAceptar"]';
-        const aceptar =
-            Array.from(document.querySelectorAll(sel)).find(visibleEnPantalla) || document.querySelector(sel);
-        if (!aceptar) return false;
-        log('   cerrando ModalError');
-        clicar(resolverObjetivo(aceptar));
-        await dormir(CONFIG.pausaEntrePasosMs);
-        await esperarSinCarga(5000, { reaccionarModal: false });
-        return true;
-    }
-
-    // Cualquier ModalError: Aceptar → SinCupo (espera el intervalo de reintento).
-    // Excepciones: bloqueo seguridad (recarga) y máximo de citas (marcar scheduled).
-    // opts.dejarMaxCitas: el llamador (Agendar) maneja ese caso.
-    async function reaccionarSiModalError(opts = {}) {
-        if (!pantallaOverlayVisible('ModalError')) return false;
-        recargarSiBloqueoSeguridad();
-        const maxCitas = hayModalMaxCitasDia();
-        if (maxCitas) {
-            if (opts.dejarMaxCitas) return false;
-            pararAlarma();
-            log(`   ModalError: ${maxCitas}`);
-            await marcarAgendado({
-                sinFechaHora: true,
-                motivo: normalizar(maxCitas).includes('abiertas') ? 'max_citas_abiertas' : 'max_citas_dia',
+            return fusionarClientes(remotos.length ? remotos : CLIENTES_INICIALES, {
+                sheetManda: !!remotos.length,
             });
-            await cerrarModalError();
-            throw new ClienteYaAgendado(
-                'cliente ya tenía el máximo de citas; marcado scheduled sin fecha/hora',
-            );
-        }
-        const crudo = textoModalErrorCrudo() || 'ModalError';
-        log(`   ModalError → Aceptar y esperar reintento: ${crudo}`);
-        await cerrarModalError();
-        throw new SinCupo(crudo);
-    }
-
-    async function esperarSinCarga(timeout, opts = {}) {
-        const reaccionarModal = opts.reaccionarModal !== false;
-        // Compat: lanzarSinCupo:false también desactiva la reacción al modal.
-        const activo = reaccionarModal && opts.lanzarSinCupo !== false;
-        const porDefecto = (CONFIG.cargando && CONFIG.cargando.timeoutMs) || 15000;
-        const limite = Date.now() + (timeout ?? porDefecto);
-        while (Date.now() < limite) {
-            recargarSiBloqueoSeguridad();
-            if (activo) await reaccionarSiModalError(opts);
-            if (!estaCargando()) {
-                await dormir(50);
-                if (!estaCargando()) return true;
-            }
-            await dormir(100);
-        }
-        return false;
-    }
-
-    async function esperarCualquiera(sels, timeout) {
-        const lista = Array.isArray(sels)
-            ? sels
-            : String(sels)
-                  .split(',')
-                  .map((s) => s.trim())
-                  .filter(Boolean);
-        const limite = Date.now() + timeout;
-        while (Date.now() < limite) {
-            recargarSiBloqueoSeguridad();
-            await reaccionarSiModalError();
-            for (const sel of lista) {
-                const el = buscar(sel) || Array.from(document.querySelectorAll(sel)).find(visibleEnPantalla);
-                if (el) return el;
-            }
-            await dormir(150);
-        }
-        return null;
-    }
-
-    async function estabilizarTrasPaso(paso) {
-        recargarSiBloqueoSeguridad();
-        await reaccionarSiModalError();
-        await esperarSinCarga((CONFIG.cargando && CONFIG.cargando.timeoutMs) || 15000);
-        if (paso.esperaHasta) {
-            await esperarCualquiera(paso.esperaHasta, CONFIG.timeoutElementoMs);
-        }
-        await reaccionarSiModalError();
-        if (paso.accion === 'fechaYHora' || (paso.sel && /PasoDos.*btnSiguiente/.test(paso.sel))) {
-            await reafirmarHoraElegida();
-        }
-        const ms =
-            paso.espera !== undefined
-                ? paso.espera
-                : CONFIG.esperaTrasClicMs !== undefined
-                  ? CONFIG.esperaTrasClicMs
-                  : CONFIG.pausaEntrePasosMs;
-        if (ms > 0) await dormir(ms);
-    }
-
-    function buscar(sel, contiene) {
-        const nodos = Array.from(document.querySelectorAll(sel)).filter(
-            (n) => visible(n) || visibleEnPantalla(n),
-        );
-        if (!contiene) return nodos[0] || null;
-        const objetivo = contiene.trim().toLowerCase();
-        return nodos.find((n) => (n.innerText || n.value || '').trim().toLowerCase().includes(objetivo)) || null;
-    }
-
-    async function esperarElemento(sel, contiene, timeout) {
-        if (!contiene && String(sel).includes(',')) {
-            return esperarCualquiera(sel, timeout);
-        }
-        const limite = Date.now() + timeout;
-        while (Date.now() < limite) {
-            recargarSiBloqueoSeguridad();
-            const el = buscar(sel, contiene);
-            if (el) return el;
-            await dormir(150);
-        }
-        return null;
-    }
-
-    function disparar(el, tipos) {
-        tipos.forEach((t) => el.dispatchEvent(new Event(t, { bubbles: true })));
-    }
-
-    // Cada control del player es un <div tipo="Control"> envuelto por un div con
-    // nombrecontrol. El manejador de clic está en el interior, y los eventos
-    // burbujean hacia arriba, así que un clic en la envoltura no dispara nada.
-    function resolverObjetivo(el) {
-        if (el.getAttribute('tipo') === 'Control') return el;
-        return el.querySelector('[tipo="Control"]') || el;
-    }
-
-    async function esperarOpcion(select, coincide, timeout) {
-        const limite = Date.now() + timeout;
-        while (Date.now() < limite) {
-            const opcion = Array.from(select.options).find(coincide);
-            if (opcion) return opcion;
-            await dormir(250);
-        }
-        return null;
-    }
-
-    function clicar(el) {
-        // Con @grant GM_xmlhttpRequest el script corre en un sandbox: window no es
-        // la ventana de la página y PointerEvent rechaza view: window. Hay que
-        // usar la ventana real (unsafeWindow) o no pasar view.
-        const vista = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-        const opciones = { bubbles: true, cancelable: true, view: vista };
-        ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach((t) => {
-            const Evento = t.startsWith('pointer') && vista.PointerEvent ? vista.PointerEvent : vista.MouseEvent;
-            el.dispatchEvent(new Evento(t, opciones));
-        });
-    }
-
-    // Elegir una opción de un <select> que el player llena al abrirlo.
-    async function elegirOpcion(select, coincide, timeout) {
-        const limite = Date.now() + timeout;
-        let opcion = null;
-        while (!opcion && Date.now() < limite) {
-            select.focus();
-            clicar(select);
-            opcion = await esperarOpcion(select, coincide, 2000);
-        }
-        if (!opcion) return null;
-        aplicarOpcionSelect(select, opcion);
-        return opcion;
-    }
-
-    function aplicarOpcionSelect(select, opcion) {
-        // selectedIndex es más fiable que value con cadenas tipo
-        // "10/15/2026 2:00:00 PM" (formato real del select de Horas DIAN).
-        // Si el player recreó el <select>, la opción vieja ya no sirve: se
-        // reubica por value o por texto en el select actual.
-        let objetivo = opcion;
-        if (!objetivo || objetivo.parentElement !== select) {
-            const value = String((opcion && opcion.value) || '').trim();
-            const texto = ((opcion && opcion.textContent) || '').replace(/\s+/g, ' ').trim();
-            objetivo =
-                (value && Array.from(select.options).find((o) => String(o.value).trim() === value)) ||
-                (texto &&
-                    Array.from(select.options).find(
-                        (o) => (o.textContent || '').replace(/\s+/g, ' ').trim() === texto,
-                    )) ||
-                opcion;
-        }
-        if (!objetivo) return false;
-        select.selectedIndex = objetivo.index;
-        objetivo.selected = true;
-        if (String(objetivo.value || '').trim() !== '') {
-            select.value = objetivo.value;
-        }
-        disparar(select, ['input', 'change']);
-        return true;
-    }
-
-    // Formato real DIAN: texto "2:00 PM" / value "10/15/2026 2:00:00 PM".
-    function esOpcionHora(o) {
-        if (!o) return false;
-        const texto = (o.textContent || '').replace(/\s+/g, ' ').trim();
-        const value = String(o.value || '').trim();
-        if (!value && !texto) return false;
-        if (/seleccion|elija|elige|escoger/i.test(texto) && !/\d/.test(texto)) return false;
-        if (/^(0|-1|null|undefined)$/i.test(value) && !/\d/.test(texto)) return false;
-        if (/\d{1,2}\s*:\s*\d{2}/.test(texto) || /\d{1,2}\s*:\s*\d{2}/.test(value)) return true;
-        if (/\d{1,2}\/\d{1,2}\/\d{2,4}\s+\d{1,2}:\d{2}/.test(value)) return true;
-        if (!value) return false;
-        return !o.disabled;
-    }
-
-    function resumenOpcionesHoras(select) {
-        if (!select) return 'sin select';
-        const opts = Array.from(select.options);
-        if (!opts.length) return 'sin options';
-        return opts
-            .map((o) => `"${(o.textContent || '').replace(/\s+/g, ' ').trim()}" value="${o.value}" disabled=${o.disabled}`)
-            .join(' | ');
-    }
-
-    function selectHorasActual() {
-        const sel = (CONFIG.fechaYHora && CONFIG.fechaYHora.selHoras) || 'div[nombrecontrol="Horas"] select.customSelect';
-        const caja = document.querySelector('div[nombrecontrol="Horas"]');
-        return (
-            (caja && caja.querySelector('select.customSelect, select')) ||
-            document.querySelector(sel) ||
-            buscar(sel) ||
-            null
-        );
-    }
-
-    function horaActualOk(select) {
-        const el = select || selectHorasActual();
-        if (!el || !horaElegida) return false;
-        const o = el.options[el.selectedIndex];
-        if (!esOpcionHora(o)) return false;
-        const value = String(o.value || '').trim();
-        const texto = (o.textContent || '').replace(/\s+/g, ' ').trim();
-        if (horaElegida.value && value && value === horaElegida.value) return true;
-        if (horaElegida.texto && texto && texto === horaElegida.texto) return true;
-        return false;
-    }
-
-    function recordarHoraElegida(texto, value) {
-        horaElegida = {
-            texto: ((texto || '') + '').replace(/\s+/g, ' ').trim(),
-            value: String(value || '').trim(),
-        };
-    }
-
-    // Si el player vació el select tras aceptar la hora, la vuelve a poner.
-    async function reafirmarHoraElegida() {
-        if (!horaElegida || (!horaElegida.value && !horaElegida.texto)) return false;
-        let select = selectHorasActual();
-        if (!select) return false;
-        if (horaActualOk(select)) return true;
-
-        const opcion =
-            (horaElegida.value &&
-                Array.from(select.options).find((o) => String(o.value || '').trim() === horaElegida.value)) ||
-            (horaElegida.texto &&
-                Array.from(select.options).find(
-                    (o) => (o.textContent || '').replace(/\s+/g, ' ').trim() === horaElegida.texto,
-                )) ||
-            null;
-        if (!opcion || !esOpcionHora(opcion)) {
-            log(`   hora perdida y no está en el select (${horaElegida.texto || horaElegida.value})`);
-            return false;
-        }
-        log(`   hora se borró; reaplicando ${horaElegida.texto || horaElegida.value}`);
-        if (!aplicarOpcionSelect(select, opcion)) return false;
-        await dormir(300);
-        return horaActualOk(selectHorasActual());
-    }
-
-    // Las horas que ofrece la página dependen del día elegido, así que un día
-    // habilitado en el calendario no garantiza horas libres. Se recorren los días
-    // habilitados y se toma el primero que sí tenga horas.
-    async function elegirFechaYHora() {
-        const {
-            selBoton,
-            selAbierto,
-            selDia,
-            selMesSiguiente,
-            selHoras,
-            selSiguiente,
-            timeoutPasoMs,
-            timeoutCalendarioMs,
-            timeoutDiasMs,
-            timeoutHorasMs,
-            confirmarHoraMs,
-            intentosHora,
-        } = CONFIG.fechaYHora;
-
-        const limitePaso = Date.now() + (timeoutPasoMs || 5 * 60 * 1000);
-        const resto = () => Math.max(0, limitePaso - Date.now());
-        const restoO = (tope) => Math.max(1000, Math.min(tope, resto()));
-
-        function calendarioAbierto() {
-            const tabla = document.querySelector(selAbierto);
-            return !!(tabla && (visibleEnPantalla(tabla) || visible(tabla)));
-        }
-
-        function selectHoras() {
-            const caja = document.querySelector('div[nombrecontrol="Horas"]');
-            const el =
-                (caja && caja.querySelector('select.customSelect, select')) ||
-                document.querySelector(selHoras) ||
-                buscar(selHoras);
-            return el || null;
-        }
-
-        // No usar offsetParent: el popup del calendario a veces lo deja en null
-        // y el script juraba que no había días aunque se veían en pantalla.
-        function ordenFecha(valor) {
-            const n = Date.parse(String(valor).replace(/\./g, '/'));
-            return Number.isNaN(n) ? 0 : n;
-        }
-
-        function listarDiasHabilitados() {
-            const celdas = document.querySelectorAll(
-                'div[nombrecontrol="Calendario"] td.k-calendar-td',
-            );
-            const vistos = new Set();
-            const dias = [];
-            for (const td of celdas) {
-                if (td.classList.contains('k-disabled') || td.classList.contains('k-state-disabled')) continue;
-                if (td.getAttribute('aria-disabled') === 'true') continue;
-                const a = td.querySelector('a.k-link');
-                if (!a) continue;
-                if (!visibleEnPantalla(a) && !visibleEnPantalla(td) && !visible(a)) continue;
-                const valor = a.getAttribute('data-value');
-                if (!valor || vistos.has(valor)) continue;
-                vistos.add(valor);
-                dias.push(valor);
-            }
-            if (!dias.length) {
-                for (const a of document.querySelectorAll(selDia)) {
-                    if (!(visibleEnPantalla(a) || visible(a))) continue;
-                    const valor = a.getAttribute('data-value');
-                    if (!valor || vistos.has(valor)) continue;
-                    vistos.add(valor);
-                    dias.push(valor);
-                }
-            }
-            dias.sort((a, b) => ordenFecha(a) - ordenFecha(b));
-            return dias;
-        }
-
-        function clicMesSiguiente() {
-            const cal = document.querySelector('div[nombrecontrol="Calendario"]');
-            if (!cal) return false;
-            const btn = cal.querySelector(
-                '.k-nav-next, .k-calendar-nav-next, [aria-label="Next"], [aria-label="Siguiente"]',
-            );
-            if (!btn) return false;
-            clicar(resolverObjetivo(btn));
-            return true;
-        }
-
-        async function abrirCalendario() {
-            if (calendarioAbierto() && listarDiasHabilitados().length) return true;
-            const boton =
-                buscar(selBoton) ||
-                Array.from(document.querySelectorAll(selBoton)).find(visibleEnPantalla) ||
-                (await esperarElemento(selBoton, null, restoO(CONFIG.timeoutElementoMs)));
-            if (!boton) {
-                await reaccionarSiModalError();
-                if (resto() <= 0) throw new Error('No apareció el botón de fecha');
-                return false;
-            }
-            await esperarSinCarga(restoO((CONFIG.cargando && CONFIG.cargando.timeoutMs) || 15000));
-            if (!calendarioAbierto()) {
-                clicar(resolverObjetivo(boton));
-                const limite = Date.now() + restoO(timeoutCalendarioMs);
-                while (Date.now() < limite && !calendarioAbierto()) {
-                    if (estaCargando()) {
-                        await dormir(200);
-                        continue;
-                    }
-                    await dormir(200);
-                }
-            }
-            return calendarioAbierto();
-        }
-
-        async function esperarDiasHabilitados() {
-            const limite = Date.now() + restoO(timeoutDiasMs);
-            let aviso = 0;
-            let mesesAdelante = 0;
-            while (Date.now() < limite) {
-                recargarSiBloqueoSeguridad();
-                if (estaCargando()) {
-                    await esperarSinCarga(restoO(30000));
-                    continue;
-                }
-                await abrirCalendario();
-                const dias = listarDiasHabilitados();
-                if (dias.length) return dias;
-                // Octubre sin cupo y noviembre solo en la flecha: pasar de mes.
-                if (mesesAdelante < 2 && calendarioAbierto() && clicMesSiguiente()) {
-                    mesesAdelante++;
-                    log(`   sin días en este mes; pasando al siguiente (${mesesAdelante})`);
-                    await esperarSinCarga(restoO(15000));
-                    continue;
-                }
-                if (Date.now() - aviso > 15000) {
-                    aviso = Date.now();
-                    log(`   calendario visible, aún sin días habilitados (${Math.ceil(resto() / 1000)} s restantes)`);
-                }
-                await dormir(400);
-            }
-            return listarDiasHabilitados();
-        }
-
-        const horaSeleccionada = (select) => {
-            const o = select && select.options[select.selectedIndex];
-            return esOpcionHora(o) ? o : null;
-        };
-        const siguienteListo = () => {
-            const el = document.querySelector(selSiguiente);
-            return !!(el && (visibleEnPantalla(el) || visible(el))) || !!buscar(selSiguiente);
-        };
-
-        function empaquetarHora(select, opcion, texto) {
-            const txt = (texto || (opcion && opcion.textContent) || '').replace(/\s+/g, ' ').trim();
-            const val = String((opcion && opcion.value) || (select && select.value) || '').trim();
-            recordarHoraElegida(txt, val);
-            return { select, opcion: opcion || null, texto: txt };
-        }
-
-        // Re-consulta el <select> en cada sondeo (el player puede recrearlo).
-        // No se aborta a las 3 aplicaciones: si las horas se ven, se insiste
-        // hasta el tope del paso.
-        async function esperarYElegirHora() {
-            const limite = Date.now() + restoO(timeoutHorasMs);
-            let aplicaciones = 0;
-            let ultimaTexto = '';
-            let ultimoValue = '';
-            let aviso = 0;
-            let clics = 0;
-            let ultimoClic = 0;
-            while (Date.now() < limite) {
-                recargarSiBloqueoSeguridad();
-                await reaccionarSiModalError();
-                if (estaCargando()) {
-                    await esperarSinCarga(restoO(30000));
-                    continue;
-                }
-                let select = selectHoras();
-                const elegida = horaSeleccionada(select);
-                if (elegida && (aplicaciones > 0 || siguienteListo())) {
-                    return empaquetarHora(select, elegida, elegida.textContent.trim());
-                }
-                // Siguiente listo pero la hora se borró: reaplicar, no dar por bueno.
-                if (aplicaciones > 0 && siguienteListo() && (ultimaTexto || ultimoValue)) {
-                    recordarHoraElegida(ultimaTexto, ultimoValue);
-                    if (await reafirmarHoraElegida()) {
-                        const actual = selectHoras();
-                        return empaquetarHora(actual, horaSeleccionada(actual), ultimaTexto);
-                    }
-                }
-
-                let opcion = select && Array.from(select.options).find(esOpcionHora);
-                // El customSelect a menudo nace vacío: las horas llegan al abrirlo.
-                if (select && !opcion && Date.now() - ultimoClic > 1200 && clics < 12) {
-                    select.scrollIntoView({ block: 'center' });
-                    select.focus();
-                    clicar(select);
-                    clics++;
-                    ultimoClic = Date.now();
-                    log(`   abriendo selector de horas (clic ${clics})`);
-                    await dormir(700);
-                    select = selectHoras();
-                    opcion = select && Array.from(select.options).find(esOpcionHora);
-                }
-                if (!opcion) {
-                    if (Date.now() - aviso > 15000) {
-                        aviso = Date.now();
-                        log(
-                            `   esperando horas (${Math.ceil((limite - Date.now()) / 1000)} s) ` +
-                                `[${resumenOpcionesHoras(select)}]`,
-                        );
-                    }
-                    await dormir(400);
-                    continue;
-                }
-
-                aplicaciones++;
-                ultimaTexto = opcion.textContent.trim();
-                ultimoValue = String(opcion.value || '').trim();
-                log(`   aplicando hora ${ultimaTexto} (intento ${aplicaciones})`);
-
-                // Releer el select: el player puede haberlo recreado entre el
-                // clic de abrir y ahora; aplicar sobre el nodo viejo no marca nada.
-                select = selectHoras();
-                if (!select || !aplicarOpcionSelect(select, opcion)) {
-                    log('   no se pudo aplicar la hora en el select actual');
-                    await dormir(400);
-                    continue;
-                }
-                recordarHoraElegida(ultimaTexto, ultimoValue);
-                // No blur inmediato: a veces el player borra la selección al
-                // salir del campo antes de aceptar el change.
-                await dormir(300);
-
-                const limiteConfirmar = Math.min(limite, Date.now() + confirmarHoraMs);
-                while (Date.now() < limiteConfirmar) {
-                    await dormir(200);
-                    const actual = selectHoras();
-                    const ok = horaSeleccionada(actual);
-                    if (ok) return empaquetarHora(actual, ok, ok.textContent.trim());
-                    // Aceptada por el player aunque haya rehecho el select.
-                    if (
-                        ultimoValue &&
-                        actual &&
-                        String(actual.value || '').trim() === ultimoValue
-                    ) {
-                        const misma = Array.from(actual.options).find(
-                            (o) => String(o.value || '').trim() === ultimoValue,
-                        );
-                        return empaquetarHora(actual, misma, ultimaTexto);
-                    }
-                    // Se borró durante la confirmación: reaplicar en vez de rendirse.
-                    if (await reafirmarHoraElegida()) {
-                        const fijo = selectHoras();
-                        const otra = horaSeleccionada(fijo);
-                        if (otra || siguienteListo()) {
-                            return empaquetarHora(fijo, otra, ultimaTexto);
-                        }
-                    }
-                }
-                const actual = selectHoras();
-                log(
-                    `   la hora no se confirmó (index=${actual ? actual.selectedIndex : '-'}, ` +
-                        `value="${actual ? actual.value : ''}")`,
-                );
-            }
-            return { select: selectHoras(), opcion: null, aplicaciones };
-        }
-
-        // Tras elegir: 1–2 chequeos rápidos por si el player vacía el select.
-        // No espera a Siguiente (eso lo hace el paso siguiente); la hora se
-        // reafirma otra vez justo antes del clic en Siguiente.
-        async function sostenerHoraElegida(resultado) {
-            if (!resultado || !(resultado.opcion || resultado.texto)) return false;
-            recordarHoraElegida(
-                resultado.texto,
-                (resultado.opcion && resultado.opcion.value) || (horaElegida && horaElegida.value) || '',
-            );
-            for (let i = 0; i < 2; i++) {
-                await dormir(300);
-                if (estaCargando()) await esperarSinCarga(restoO(5000), { reaccionarModal: false });
-                if (horaActualOk()) continue;
-                await reafirmarHoraElegida();
-            }
-            return horaActualOk();
-        }
-
-        horaElegida = null;
-        await abrirCalendario();
-
-        // Se guardan los data-value y no los nodos porque el calendario se vuelve
-        // a dibujar cada vez que se abre y las referencias quedarían obsoletas.
-        const dias = await esperarDiasHabilitados();
-
-        if (!dias.length) throw new SinCupo('el calendario no tiene días habilitados');
-        log(`   días habilitados: ${dias.length}`);
-
-        let ultimoDetalle = '';
-        for (const valor of dias) {
-            if (resto() <= 0) break;
-            await abrirCalendario();
-
-            const dia =
-                document.querySelector(`${selDia}[data-value="${valor}"]`) ||
-                buscar(`${selDia}[data-value="${valor}"]`);
-            if (!dia) {
-                log(`   el día ${valor} ya no está habilitado`);
-                continue;
-            }
-
-            log(`   probando ${dia.title || valor}`);
-            clicar(dia);
-            await esperarSinCarga(restoO(30000));
-            await dormir(CONFIG.esperaTrasClicMs ?? 200);
-            // Dar tiempo a que el combo de horas exista antes de abrirlo.
-            const limiteSelect = Date.now() + Math.min(8000, restoO(8000));
-            while (Date.now() < limiteSelect && !selectHoras()) await dormir(200);
-
-            const resultado = await esperarYElegirHora();
-            if (resultado.opcion || resultado.texto) {
-                const valorHora = resultado.opcion ? ` (value="${resultado.opcion.value}")` : '';
-                log(`   hora elegida: ${resultado.texto}${valorHora}`);
-                await sostenerHoraElegida(resultado);
-                // Título CUPOS ahora: el AHK busca la casilla mientras carga el captcha.
-                detener('¡CUPOS! Hay fecha y hora.', { sonido: false });
-                log('fecha y hora → título CUPOS');
-                return true;
-            }
-
-            ultimoDetalle = resumenOpcionesHoras(resultado.select);
-            log(
-                resultado.aplicaciones
-                    ? `   el player no aceptó la hora tras ${resultado.aplicaciones} intento(s) (${ultimoDetalle})`
-                    : `   ese día no tiene horas libres (${ultimoDetalle})`,
-            );
-        }
-
-        throw new SinCupo(
-            ultimoDetalle
-                ? `ningún día habilitado tiene horas libres [${ultimoDetalle}]`
-                : 'ningún día habilitado tiene horas libres',
-        );
-    }
-
-    // Widget / pantalla del captcha (el textarea del token casi siempre está oculto).
-    function captchaUiPresente() {
-        if (document.querySelector('iframe[src*="recaptcha"]')) return true;
-        if (document.querySelector('iframe[title*="reCAPTCHA"], iframe[title*="recaptcha"]')) return true;
-        if (document.querySelector('.g-recaptcha, [data-sitekey]')) return true;
-        if (document.querySelector('#g-recaptcha-response')) return true;
-        const paso = document.querySelector(
-            'div[nombrepantalla="PasoTres"] [tipo="Pantalla"][nombre="PasoTres"]',
-        );
-        if (!paso) return false;
-        const st = estiloDe(paso);
-        if (st) return st.display !== 'none' && st.visibility !== 'hidden';
-        return visibleEnPantalla(paso);
-    }
-
-    function captchaTokenActual() {
-        const token = document.querySelector(CONFIG.captcha.selToken);
-        return token && token.value ? token.value : '';
-    }
-
-    // True si hay un token nuevo respecto al último consumido (o el vigente).
-    function captchaResueltoNuevo() {
-        const valor = captchaTokenActual();
-        return !!(valor && valor !== tokenCaptchaUsado);
-    }
-
-    // El player borra tipo/número al caducar el captcha. Se reponen sin abrir el
-    // desplegable si ya está bien; solo se abre cuando falta o quedó vacío.
-    function tipoDocumentoActualOk(select) {
-        if (!select) return false;
-        const opt = select.options[select.selectedIndex];
-        if (!opt || String(opt.value || '').trim() === '') return false;
-        const objetivo = normalizar(CONFIG.documento.tipoContiene);
-        return normalizar(opt.textContent).includes(objetivo);
-    }
-
-    function opcionTipoDocumento(select) {
-        if (!select) return null;
-        const objetivo = normalizar(CONFIG.documento.tipoContiene);
-        return (
-            Array.from(select.options).find(
-                (o) => o.value !== '' && normalizar(o.textContent).includes(objetivo),
-            ) || null
-        );
-    }
-
-    // Si las opciones ya están en el DOM, aplica sin esperar. No abre el combo.
-    function reponerTipoDocumentoSiListo() {
-        const select = document.querySelector(CONFIG.documento.selTipo);
-        if (!select || !visibleEnPantalla(select)) return false;
-        if (tipoDocumentoActualOk(select)) return true;
-        const opcion = opcionTipoDocumento(select);
-        if (!opcion) return false;
-        aplicarOpcionSelect(select, opcion);
-        log(`   tipo documento: ${opcion.textContent.trim()}`);
-        return true;
-    }
-
-    async function asegurarTipoDocumento(timeoutMs = 5000) {
-        const select = document.querySelector(CONFIG.documento.selTipo);
-        if (!select || !visibleEnPantalla(select)) return false;
-        if (tipoDocumentoActualOk(select)) return true;
-        if (reponerTipoDocumentoSiListo()) return true;
-        if (timeoutMs <= 0) return false;
-
-        const objetivo = normalizar(CONFIG.documento.tipoContiene);
-        const opcion = await elegirOpcion(
-            select,
-            (o) => o.value !== '' && normalizar(o.textContent).includes(objetivo),
-            timeoutMs,
-        );
-        if (!opcion) return false;
-        log(`   tipo documento: ${opcion.textContent.trim()}`);
-        return true;
-    }
-
-    // Escribe la cédula si el campo está visible. Solo dispara la consulta
-    // (blur) cuando el valor cambió o se pide explícitamente tras un captcha nuevo.
-    function asegurarNumeroDocumento(opts = {}) {
-        if (!clienteActual) return false;
-        const campo = document.querySelector(CONFIG.documento.selNumero);
-        if (!campo) return false;
-        const wrap = campo.closest('#divPasoTresNumeroDocumento') || campo;
-        if (!visibleEnPantalla(wrap) && !visibleEnPantalla(campo)) return false;
-
-        const esperado = String(clienteActual.cedula);
-        const actual = String(campo.value || '');
-        if (actual === esperado && !opts.forzarConsulta) return true;
-
-        campo.scrollIntoView({ block: 'center' });
-        campo.focus();
-        if (actual !== esperado) {
-            campo.value = '';
-            campo.value = esperado;
-            disparar(campo, ['input', 'change', 'keyup']);
-            log(`   documento ${esperado}`);
-        }
-        campo.blur();
-        clicar(document.body);
-        return true;
-    }
-
-    // Solo tipo de documento mientras el captcha está pendiente. El número y el
-    // blur de consulta se hacen UNA vez en escribirDocumento (reconsultar aquí
-    // vaciaba el token y trababa el PasoTres).
-    function mantenerTipoDocumentoRapido() {
-        reponerTipoDocumentoSiListo();
-    }
-
-    async function mantenerDatosDocumento(opts = {}) {
-        await asegurarTipoDocumento(opts.timeoutTipo ?? 4000);
-        asegurarNumeroDocumento({ forzarConsulta: !!opts.forzarConsulta });
-    }
-
-    // El reCAPTCHA vive en un iframe de google.com: el script no puede marcarlo
-    // (es otro origen) y Google rechaza los clics sintéticos incluso si pudiera.
-    // Lo resuelve la persona. El sonido viene del trámite; CUPOS, de la hora.
-    async function esperarCaptcha() {
-        const { timeoutMs } = CONFIG.captcha;
-        const reaplicarMs = (CONFIG.documento && CONFIG.documento.reaplicarMs) || 2500;
-
-        const limiteUi = Date.now() + CONFIG.timeoutElementoMs;
-        while (Date.now() < limiteUi && !captchaUiPresente()) {
-            await dormir(150);
-        }
-        if (!captchaUiPresente()) throw new Error('No apareció el captcha');
-        log('captcha en pantalla, esperando que lo marquen');
-
-        // Primera pasada: abrir el combo de tipo si hace falta (una sola vez).
-        await asegurarTipoDocumento(Math.min(8000, CONFIG.timeoutElementoMs));
-
-        const limite = Date.now() + timeoutMs;
-        let tarde = false;
-        let proximoMantener = 0;
-        while (Date.now() < limite) {
-            if (!tarde) tarde = marcarTerminosTemprano();
-            if (Date.now() >= proximoMantener) {
-                mantenerTipoDocumentoRapido();
-                proximoMantener = Date.now() + reaplicarMs;
-            }
-            await registrarSiModalCitaConfirmada();
-            if (captchaResueltoNuevo()) {
-                tokenCaptchaUsado = captchaTokenActual();
-                pararAlarma();
-                // No forzar consulta aquí: escribirDocumento lo hace una sola vez.
-                reponerTipoDocumentoSiListo();
-                log('captcha resuelto, continuando');
-                return true;
-            }
-            await dormir(100);
-        }
-        pararAlarma();
-        throw new Error('el captcha no se resolvió a tiempo');
-    }
-
-    // ModalInfoCita a la vista (p. ej. el operario agendó a mano): registrar en Sheet.
-    async function registrarSiModalCitaConfirmada() {
-        const selOk =
-            'div[tipo="Control"][pantalla="ModalInfoCita"][nombre="btnAceptar"]';
-        const ok = primeroVisible(selOk);
-        if (!ok || !clienteActual) return false;
-        pararAlarma();
-        if (!datosPersonaActual.nombre && !datosPersonaActual.correo) {
-            datosPersonaActual = leerDatosPersona();
-        }
-        await marcarAgendado();
-        clicar(resolverObjetivo(ok));
-        log('   cita confirmada en pantalla → guardada en Sheet');
-        await esperarSinCarga(8000, { lanzarSinCupo: false });
-        await dormir(CONFIG.esperaTrasClicMs ?? 200);
-        throw new ClienteYaAgendado('cita confirmada; guardada en Sheet');
-    }
-
-    // True si ya resolvimos un captcha real en este ciclo (no el placeholder).
-    function captchaYaResueltoEnCiclo() {
-        return !!(tokenCaptchaUsado && tokenCaptchaUsado !== 'expirado');
-    }
-
-    // El player vacía el textarea al consultar la cédula. Si YA resolvimos un
-    // captcha en este ciclo, NUNCA se vuelve a bloquear el flujo por eso.
-    async function asegurarCaptchaVigente() {
-        if (captchaTokenActual() || captchaYaResueltoEnCiclo()) return true;
-
-        log('   captcha pendiente; manteniendo documento y esperando marcado');
-        alarma('Captcha pendiente. Márcalo; el documento se mantiene.', {
-            titulo: false,
-        });
-        if (!tokenCaptchaUsado) tokenCaptchaUsado = 'expirado';
-        await esperarCaptcha();
-        return true;
-    }
-
-    // El check de términos ya está en pantalla junto al captcha: se marca mientras
-    // la persona resuelve el captcha para no gastar ese tiempo después.
-    // Devuelve true cuando el check ya quedó marcado.
-    function marcarTerminosTemprano() {
-        const el = primeroVisible('div[nombrecontrol="TerminosCondiciones"] input[type="checkbox"]');
-        if (!el) return false;
-        if (el.checked) return true;
-        clicar(el);
-        if (!el.checked) {
-            el.checked = true;
-            disparar(el, ['input', 'change']);
-        }
-        log('   términos marcados antes del captcha');
-        return true;
-    }
-
-    let tokenCaptchaUsado = '';
-
-    // ───────────────────────────── FASE FINAL ─────────────────────────────────
-
-    const SEL_AGENDAR = 'div[tipo="Control"][pantalla="PasoCuatro"][nombre="btnAgendarCita"]';
-
-    function primeroVisible(sels) {
-        const lista = (Array.isArray(sels) ? sels : String(sels).split(','))
-            .map((s) => s.trim())
-            .filter(Boolean);
-        for (const sel of lista) {
-            const el = buscar(sel) || Array.from(document.querySelectorAll(sel)).find(visibleEnPantalla);
-            if (el) return el;
-        }
-        return null;
-    }
-
-    // La página se trabó en un paso final: sin alarma, se enciende de nuevo el
-    // monitor (detener() lo apagó en el captcha) y el ciclo recarga y reintenta;
-    // el cliente sigue pendiente.
-    function fallaFaseFinal(motivo) {
-        guardarEstado({ activo: true });
-        refrescarBoton();
-        return new Error(motivo);
-    }
-
-    // Clic que debe llevar a la pantalla siguiente (paso.esperaHasta). Si no
-    // avanza, se repite el clic; si tras timeoutMs sigue igual, se pide ayuda.
-    async function clicHastaAvanzar(paso) {
-        const { reintentoMs, timeoutMs } = CONFIG.faseFinal;
-        const desc = paso.desc || paso.sel;
-        const avanzo = () => !!primeroVisible(paso.esperaHasta);
-        const limite = Date.now() + timeoutMs;
-        let clics = 0;
-        while (Date.now() < limite && !avanzo()) {
-            recargarSiBloqueoSeguridad();
-            await reaccionarSiModalError();
-            if (paso.sel && /PasoDos.*btnSiguiente/.test(paso.sel)) {
-                await reafirmarHoraElegida();
-            }
-            if (estaCargando()) {
-                await dormir(200);
-                continue;
-            }
-            // Siguiente a veces solo existe como btnSiguienteBlock hasta que
-            // DatosCorretos+términos quedan OK; se insiste en el habilitado.
-            let el = primeroVisible(paso.sel);
-            if (!el && paso.sel && paso.sel.includes('btnSiguiente')) {
-                el = primeroVisible(paso.sel.replace('btnSiguiente', 'btnSiguienteBlock'));
-            }
-            if (!el) {
-                await dormir(100);
-                continue;
-            }
-            // Block = deshabilitado: no spamear clic; esperar a que habilite.
-            if (el.getAttribute('nombre') === 'btnSiguienteBlock') {
-                await dormir(200);
-                continue;
-            }
-            clics++;
-            if (clics > 1) log(`   ${desc} no avanzó; clic ${clics}`);
-            el.scrollIntoView({ block: 'center' });
-            clicar(resolverObjetivo(el));
-            let limiteClic = Date.now() + reintentoMs;
-            while (Date.now() < Math.min(limiteClic, limite) && !avanzo() && !pantallaOverlayVisible('ModalError')) {
-                if (estaCargando()) limiteClic = Math.max(limiteClic, Date.now() + 1000);
-                await dormir(200);
-            }
-        }
-        if (!avanzo()) throw fallaFaseFinal(`${desc} no avanza`);
-        await dormir(paso.espera ?? CONFIG.esperaTrasClicMs ?? 200);
-    }
-
-    async function ejecutarPasoFinal(paso) {
-        if (paso.accion === 'documento') {
-            await escribirDocumento();
-            await dormir(paso.espera ?? CONFIG.esperaTrasClicMs ?? 200);
-            return true;
-        }
-        if (paso.accion === 'agendarCita') return agendarCitaYConfirmar();
-        if (paso.sel && !paso.marcar && paso.esperaHasta) return clicHastaAvanzar(paso);
-        try {
-            return await ejecutarPaso(paso);
         } catch (e) {
-            if (esSinCupo(e) || esClienteYaAgendado(e)) throw e;
-            throw fallaFaseFinal(`${paso.desc || paso.sel}: ${e.message}`);
+            log('Sheet sync falló: ' + e.message);
+            if (cache.length) return cache;
+            if (CLIENTES_INICIALES.length) return fusionarClientes(CLIENTES_INICIALES);
+            throw e;
         }
     }
 
-    // Clic cuando el control aparece (página lenta). Sin esperas fijas largas.
-    async function clicCuandoVisible(sel, desc, timeoutMs) {
-        const el = await esperarElemento(sel, null, timeoutMs);
-        if (!el) throw new Error(`No apareció: ${desc || sel}`);
-        el.scrollIntoView({ block: 'center' });
-        clicar(resolverObjetivo(el));
-        return el;
+    function clienteListoParaPost(c) {
+        if (!c || c.scheduled) return false;
+        if (!c.nombre || !c.apellido || !c.email || !c.celular) return false;
+        return true;
     }
 
-    // ─── ValidadorValidar (sondeo rápido de colas) ───────────────────────────
-    // Blob: panel (pegado) o hook del player. Se guarda en localStorage por PC.
-    let configValidador = null;
-    let origenBlobValidador = ''; // 'pegado' | 'hook' | ''
-    let hookValidadorListo = false;
-    let refrescarEstadoBlob = () => {};
+    function textoCiudadPreferida(cliente) {
+        const ct = cliente && cliente.ciudadTramite;
+        if (Array.isArray(ct)) return ct[0] || '';
+        return String(ct || '');
+    }
 
-    // Extrae un {...} con llaves balanceadas desde `desde` (índice de '{').
+    // ─── Blob / Validador ────────────────────────────────────────────────────
+
     function extraerObjetoBalanceado(texto, desde) {
         if (!texto || texto[desde] !== '{') return null;
         let profundidad = 0;
@@ -1891,24 +428,19 @@
         return null;
     }
 
-    // DevTools "Payload" a veces no es JSON estricto (nombre:'...' sin comillas en claves).
-    // Acepta: JSON puro, body estilo DevTools, o solo el objeto configuracion.
     function parseTextoBlobValidador(texto) {
         const raw = String(texto || '').trim();
         if (!raw) return null;
-
         try {
             return JSON.parse(raw);
         } catch (_) {
             /* seguir */
         }
-
         const idxCfg = raw.search(/configuracion\s*:/);
         if (idxCfg >= 0) {
             const despues = raw.slice(idxCfg).search(/\{/);
             if (despues >= 0) {
-                const abs = idxCfg + despues;
-                const bloque = extraerObjetoBalanceado(raw, abs);
+                const bloque = extraerObjetoBalanceado(raw, idxCfg + despues);
                 if (bloque) {
                     try {
                         return JSON.parse(bloque);
@@ -1918,26 +450,20 @@
                 }
             }
         }
-
-        // Aproximación: comillar claves sueltas y pasar ' a " (payload DevTools).
         try {
             const approx = raw
                 .replace(/([,{]\s*)([A-Za-z_][A-Za-z0-9_]*)\s*:/g, '$1"$2":')
                 .replace(/'/g, '"');
             return JSON.parse(approx);
         } catch (_) {
-            /* seguir */
+            return null;
         }
-
-        return null;
     }
 
-    // Acepta el objeto configuracion o el body completo del POST.
     function normalizarConfigValidador(data) {
         if (!data || typeof data !== 'object') return null;
-        if (data.configuracion && typeof data.configuracion === 'object') {
-            data = data.configuracion;
-        } else if (typeof data.configuracion === 'string') {
+        if (data.configuracion && typeof data.configuracion === 'object') data = data.configuracion;
+        else if (typeof data.configuracion === 'string') {
             try {
                 data = JSON.parse(data.configuracion);
             } catch (_) {
@@ -1967,7 +493,7 @@
         try {
             refrescarEstadoBlob();
         } catch (_) {
-            /* panel aún no listo */
+            /* panel */
         }
         return true;
     }
@@ -1997,7 +523,7 @@
         if (configValidadorLista()) {
             if (origenBlobValidador === 'pegado') return 'Blob: pegado';
             if (origenBlobValidador === 'hook') return 'Blob: hook';
-            if (origenBlobValidador === 'prueba') return 'Blob: fallback prueba';
+            if (origenBlobValidador === 'fallback') return 'Blob: fallback';
             return 'Blob: guardado';
         }
         return 'Blob: no';
@@ -2013,13 +539,10 @@
                 } else if (typeof raw === 'object') {
                     if (persistirConfigValidador(raw, 'hook')) return;
                     raw = JSON.stringify(raw);
-                } else {
-                    raw = String(raw);
-                }
+                } else raw = String(raw);
             }
             if (!raw) return;
-            const data = JSON.parse(raw);
-            persistirConfigValidador(data, 'hook');
+            persistirConfigValidador(JSON.parse(raw), 'hook');
         } catch (_) {
             /* ignore */
         }
@@ -2028,7 +551,6 @@
     function instalarHookValidador() {
         if (hookValidadorListo) return;
         const win = vistaPagina();
-
         try {
             const XO = win.XMLHttpRequest;
             if (XO && XO.prototype) {
@@ -2046,15 +568,13 @@
         } catch (_) {
             /* ignore */
         }
-
         try {
             if (typeof win.fetch === 'function') {
                 const origFetch = win.fetch.bind(win);
                 win.fetch = function (input, init) {
                     try {
                         const url = typeof input === 'string' ? input : input && input.url;
-                        const body = init && init.body;
-                        guardarConfigSiValidador(url, body);
+                        guardarConfigSiValidador(url, init && init.body);
                     } catch (_) {
                         /* ignore */
                     }
@@ -2064,8 +584,6 @@
         } catch (_) {
             /* ignore */
         }
-
-        // ASP.NET / jQuery.ajax si el player no usa XHR.prototype a pelo.
         try {
             const jq = win.jQuery || win.$;
             if (jq && typeof jq.ajaxPrefilter === 'function') {
@@ -2080,11 +598,32 @@
         } catch (_) {
             /* ignore */
         }
-
         hookValidadorListo = true;
     }
 
-    // Sin seed-click. Prioridad: memoria → localStorage (pegado/hook previo).
+    function asegurarBlobFallback() {
+        const enc = String((CONFIG.validador && CONFIG.validador.blobEncriptado) || '').trim();
+        if (enc.length < 20) return null;
+        const minimo = {
+            ConfiguracionServicioRestEncriptado: enc,
+            ControlesGeolocalizacion: [],
+            FormatoCitas:
+                '{cita.codigo}    {cita.fecha}    {cita.Oficina.Nombre}    img/icono1.png    img/icono2.png    img/icono3.png',
+            IdPais: 1,
+            DistanciaMinima: 0,
+            TopOficinasCercanas: 0,
+            FormatoEncabezadoOficina: '',
+            FormatoOficina: '{0}',
+            ModoWebPlayer: true,
+            TipoPolitica: 0,
+            ObtenerEspecialidadesVirtuales: false,
+            ObtenerEspecialidadesPresenciales: false,
+            GenerarTurno: false,
+        };
+        persistirConfigValidador(minimo, 'fallback');
+        return configValidador;
+    }
+
     function configValidadorLista() {
         instalarHookValidador();
         if (configValidador && configValidador.ConfiguracionServicioRestEncriptado) return true;
@@ -2094,7 +633,7 @@
             if (!origenBlobValidador) origenBlobValidador = 'guardado';
             return true;
         }
-        return false;
+        return !!asegurarBlobFallback();
     }
 
     function asegurarConfigValidador() {
@@ -2102,7 +641,7 @@
         return null;
     }
 
-    function plantillaCitaValidador(tipoCliente, tipoEspecialidad) {
+    function plantillaCita(tipoCliente, tipoEspecialidad) {
         const virtual = String(tipoEspecialidad || '0') === '2';
         return {
             CodigoCita: null,
@@ -2163,13 +702,10 @@
         return data;
     }
 
-    // Igual que monitor-dian: $.ajax en la página (no fetch). El endpoint rechaza
-    // fetch "limpio" con 403 CSR: Invalid request; acepta el body estilo player.
-    // opts: { nombre, configuracion } para Digiturno5 Validacion u otros.
     async function postValidadorValidar(respuestaBase, opts = {}) {
         const cfg = CONFIG.validador || {};
         const configuracion = opts.configuracion || asegurarConfigValidador();
-        if (!configuracion) throw new Error('sin blob del Validador (aún no capturado)');
+        if (!configuracion) throw new Error('sin blob del Validador');
 
         const win = vistaPagina();
         const jq = win.jQuery || win.$;
@@ -2179,7 +715,6 @@
 
         const nombre = opts.nombre || cfg.nombre || 'ValidadorDatos.CitasWeb';
         const url = (cfg.url || 'Player.aspx/ValidadorValidar').replace(/^\//, '');
-        // Formato que usa el player / monitor-dian (no JSON estricto en las claves top).
         const data =
             "{nombre:'" +
             nombre +
@@ -2226,93 +761,12 @@
                         new Error(
                             'Validador HTTP ' +
                                 status +
-                                (body ? ' ' + String(body).slice(0, 80) : ''),
+                                (body ? ' ' + String(body).slice(0, 120) : ''),
                         ),
                     );
                 },
             });
         });
-    }
-
-    // Un POST a colas (como monitor-dian). Sin cadena de 4 pasos.
-    // Devuelve { sinCupo, colas } o lanza si la red/config falla (fallback a clics).
-    async function sondearColasPorValidador(tipoCliente) {
-        const cfg = CONFIG.validador || {};
-        const recurso = cfg.recurso || 'CitasDIAN';
-        const tipo = String(tipoCliente || '1');
-        const tipoVirt = String(cfg.tipoEspecialidadVirtual || '2');
-        const codCat = String(cfg.categoriaCodigo || '13');
-
-        const r4 = await postValidadorValidar({
-            Fuente: 'Validador',
-            Encontrado: false,
-            DetalleAdicional: 'manejadorEncontroColas',
-            ObjetosEncontrados: [
-                JSON.stringify(plantillaCitaValidador(tipo, tipoVirt)),
-                'Nombre',
-                tipo,
-                codCat,
-                tipoVirt,
-            ],
-            Recurso: recurso,
-        });
-
-        const detalle = String(r4.DetalleAdicional || '');
-        if (detalle.indexOf('NoEncontroColas') >= 0 || !r4.Encontrado) {
-            return { sinCupo: true, colas: [] };
-        }
-        return {
-            sinCupo: false,
-            colas: Array.isArray(r4.ObjetosEncontrados) ? r4.ObjetosEncontrados : [],
-        };
-    }
-
-    // Asegura blob para la prueba Paso2 (panel/hook o fallback hardcodeado).
-    function asegurarBlobParaPruebaPaso2() {
-        if (configValidadorLista()) return configValidador;
-        const p2 = (CONFIG.validador && CONFIG.validador.pruebaPaso2) || {};
-        const enc = String(p2.blobEncriptado || '').trim();
-        if (enc.length < 20) return null;
-        const minimo = {
-            ConfiguracionServicioRestEncriptado: enc,
-            ControlesGeolocalizacion: [],
-            FormatoCitas:
-                '{cita.codigo}    {cita.fecha}    {cita.Oficina.Nombre}    img/icono1.png    img/icono2.png    img/icono3.png',
-            IdPais: 1,
-            DistanciaMinima: 0,
-            TopOficinasCercanas: 0,
-            FormatoEncabezadoOficina: '',
-            FormatoOficina: '{0}',
-            ModoWebPlayer: true,
-            TipoPolitica: 0,
-            ObtenerEspecialidadesVirtuales: false,
-            ObtenerEspecialidadesPresenciales: false,
-            GenerarTurno: false,
-        };
-        persistirConfigValidador(minimo, 'prueba');
-        return configValidador;
-    }
-
-    function citaParaPruebaPaso2(fechaIso) {
-        const p2 = (CONFIG.validador && CONFIG.validador.pruebaPaso2) || {};
-        const tipo = String(p2.tipoCliente || '1');
-        const tipoVirt = String(p2.tipoEspecialidad || CONFIG.validador.tipoEspecialidadVirtual || '2');
-        const cita = plantillaCitaValidador(tipo, tipoVirt);
-        cita.Cola = {
-            IdEspecialidad: Number(p2.idEspecialidad) || 0,
-            Nombre: p2.nombreCola || null,
-        };
-        if (fechaIso) cita.Fecha = fechaIso;
-        return cita;
-    }
-
-    // Fechas (…T00:00:00Z) → Horas usa medianoche Colombia (…T05:00:00.000Z) en el HAR.
-    function fechaIsoParaHoras(iso) {
-        const s = String(iso || '');
-        if (/T00:00:00(\.000)?Z$/i.test(s)) {
-            return s.replace(/T00:00:00(\.000)?Z$/i, 'T05:00:00.000Z');
-        }
-        return s;
     }
 
     function deserializarObjValidador(valor) {
@@ -2327,36 +781,106 @@
         return v;
     }
 
-    // ObjetosEncontrados[0] puede ser lista, string JSON, o [[…]] (doble wrap).
     function listaDesdeObjetosEncontrados(resp) {
         const objs = resp && resp.ObjetosEncontrados;
         if (!Array.isArray(objs) || !objs.length) return [];
         let first = deserializarObjValidador(objs[0]);
         if (first == null) return [];
-        if (Array.isArray(first) && first.length && Array.isArray(first[0])) {
-            first = first[0];
-        }
+        if (Array.isArray(first) && first.length && Array.isArray(first[0])) first = first[0];
         return Array.isArray(first) ? first : [first];
     }
 
-    // Solo sandbox: Fechas → Horas. Devuelve { fechas, horas, error? }. No Reserva/Creo.
-    async function probarPaso2FechasHoras() {
-        const p2 = (CONFIG.validador && CONFIG.validador.pruebaPaso2) || {};
-        if (p2.activo === false) throw new Error('pruebaPaso2 desactivada en CONFIG');
-
-        if (!asegurarBlobParaPruebaPaso2()) {
-            throw new Error('sin blob (pega en panel o revisa blobEncriptado)');
+    function fechaIsoParaHoras(iso) {
+        const s = String(iso || '');
+        if (/T00:00:00(\.000)?Z$/i.test(s)) {
+            return s.replace(/T00:00:00(\.000)?Z$/i, 'T05:00:00.000Z');
         }
-        const token = String(p2.infoServicioWeb || '').trim();
-        if (token.length < 40) throw new Error('falta infoServicioWeb en CONFIG.validador.pruebaPaso2');
+        return s;
+    }
 
-        const idEsp = Number(p2.idEspecialidad) || 0;
-        if (!idEsp) throw new Error('falta idEspecialidad en pruebaPaso2');
+    function tokenInfo() {
+        return String((CONFIG.validador && CONFIG.validador.infoServicioWeb) || '').trim();
+    }
 
-        const recurso = (CONFIG.validador && CONFIG.validador.recurso) || 'CitasDIAN';
-        const citaFechas = citaParaPruebaPaso2(null);
+    function normalizarTextoMatch(s) {
+        return String(s || '')
+            .toLowerCase()
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .replace(/\s+/g, ' ')
+            .trim();
+    }
 
-        log(`   Paso2 prueba: Fechas IdEspecialidad=${idEsp}`);
+    async function resolverColaPorTramite(cliente) {
+        const cfg = CONFIG.validador || {};
+        const recurso = cfg.recurso || 'CitasDIAN';
+        const tipo = String(cliente.tipoPersona || '1');
+        const tipoVirt = String(cfg.tipoEspecialidadVirtual || '2');
+        const codCat = String(cfg.categoriaCodigo || '13');
+        const preferida = textoCiudadPreferida(cliente);
+        const preferidas = Array.isArray(cliente.ciudadTramite)
+            ? cliente.ciudadTramite
+            : [preferida];
+
+        const r = await postValidadorValidar({
+            Fuente: 'Validador',
+            Encontrado: false,
+            DetalleAdicional: 'manejadorEncontroColas',
+            ObjetosEncontrados: [
+                JSON.stringify(plantillaCita(tipo, tipoVirt)),
+                'Nombre',
+                tipo,
+                codCat,
+                tipoVirt,
+            ],
+            Recurso: recurso,
+        });
+
+        if (!r.Encontrado) {
+            throw new SinCupo('Validador: sin colas (' + (r.DetalleAdicional || '') + ')');
+        }
+
+        const colas = listaDesdeObjetosEncontrados(r).filter((c) => c && c.IdEspecialidad);
+        if (!colas.length) throw new SinCupo('Validador: lista de colas vacía');
+
+        for (const pref of preferidas) {
+            const nPref = normalizarTextoMatch(pref);
+            if (!nPref) continue;
+            const hit = colas.find((c) => normalizarTextoMatch(c.Nombre) === nPref);
+            if (hit) {
+                return { IdEspecialidad: hit.IdEspecialidad, Nombre: hit.Nombre };
+            }
+        }
+        for (const pref of preferidas) {
+            const nPref = normalizarTextoMatch(pref);
+            if (!nPref || nPref.length < 8) continue;
+            const hit = colas.find((c) => {
+                const n = normalizarTextoMatch(c.Nombre);
+                return n.includes(nPref) || nPref.includes(n);
+            });
+            if (hit) {
+                return { IdEspecialidad: hit.IdEspecialidad, Nombre: hit.Nombre };
+            }
+        }
+
+        throw new SinCupo(
+            'ninguna cola coincide con ciudadTramite: ' + preferidas.join(' | '),
+        );
+    }
+
+    async function consultarFechasHoras(cola, tipoCliente) {
+        const cfg = CONFIG.validador || {};
+        const recurso = cfg.recurso || 'CitasDIAN';
+        const token = tokenInfo();
+        const tipoVirt = String(cfg.tipoEspecialidadVirtual || '2');
+        const tipo = String(tipoCliente || '1');
+
+        const citaFechas = plantillaCita(tipo, tipoVirt);
+        citaFechas.Cola = {
+            IdEspecialidad: Number(cola.IdEspecialidad),
+            Nombre: cola.Nombre || null,
+        };
+
         const rFechas = await postValidadorValidar({
             Fuente: 'Validador',
             Encontrado: false,
@@ -2364,29 +888,20 @@
             ObjetosEncontrados: [JSON.stringify(citaFechas), token, true],
             Recurso: recurso,
         });
-
         if (!rFechas.Encontrado) {
-            return {
-                fechas: [],
-                horas: [],
-                error: 'Fechas: Encontrado=false (' + (rFechas.DetalleAdicional || '') + ')',
-            };
+            throw new SinCupo('Fechas: ' + (rFechas.DetalleAdicional || 'sin cupo'));
         }
 
-        const fechasRaw = listaDesdeObjetosEncontrados(rFechas).filter(
-            (x) => typeof x === 'string' || (x && x.Fecha),
-        );
-        const fechas = fechasRaw.map((x) => (typeof x === 'string' ? x : x.Fecha)).filter(Boolean);
-        log(`   Paso2 prueba: ${fechas.length} fecha(s) → ${fechas.slice(0, 5).join(', ')}${fechas.length > 5 ? '…' : ''}`);
-
-        if (!fechas.length) {
-            return { fechas: [], horas: [], error: 'Fechas OK pero lista vacía' };
-        }
+        const fechas = listaDesdeObjetosEncontrados(rFechas)
+            .map((x) => (typeof x === 'string' ? x : x && x.Fecha))
+            .filter(Boolean);
+        if (!fechas.length) throw new SinCupo('Fechas vacías');
 
         const fechaElegida = fechaIsoParaHoras(fechas[0]);
-        const citaHoras = citaParaPruebaPaso2(fechaElegida);
+        const citaHoras = plantillaCita(tipo, tipoVirt);
+        citaHoras.Cola = citaFechas.Cola;
+        citaHoras.Fecha = fechaElegida;
 
-        log(`   Paso2 prueba: Horas fecha=${fechaElegida}`);
         const rHoras = await postValidadorValidar({
             Fuente: 'Validador',
             Encontrado: false,
@@ -2394,269 +909,76 @@
             ObjetosEncontrados: [JSON.stringify(citaHoras)],
             Recurso: recurso,
         });
-
         if (!rHoras.Encontrado) {
-            return {
-                fechas,
-                horas: [],
-                fechaConsultada: fechaElegida,
-                error: 'Horas: Encontrado=false (' + (rHoras.DetalleAdicional || '') + ')',
-            };
+            throw new SinCupo('Horas: ' + (rHoras.DetalleAdicional || 'sin cupo'));
         }
 
         const slots = listaDesdeObjetosEncontrados(rHoras).filter(
-            (h) => h && (h.IdentificadoresAgendas || h.HoraAgenda),
+            (h) => h && h.IdentificadoresAgendas && h.HoraAgenda,
         );
-        const horas = slots.map((h) => ({
-            contenido: h.Contenido || h.HoraAgenda || '',
-            horaAgenda: h.HoraAgenda || '',
-            idAgenda: h.IdentificadoresAgendas || '',
-            disponibles: h.NumeroAgendasDisponibles,
-        }));
+        if (!slots.length) throw new SinCupo('sin horas disponibles');
 
-        horas.forEach((h, i) => {
-            log(`   Paso2 slot[${i}] ${h.contenido} → ${h.idAgenda}`);
-        });
-
-        return { fechas, fechaConsultada: fechaElegida, horas, slotsRaw: slots };
+        return { fechas, fechaConsultada: fechaElegida, slots };
     }
 
-    function configDigiturno5() {
-        const p2 = (CONFIG.validador && CONFIG.validador.pruebaPaso2) || {};
-        const token = String(p2.infoServicioWeb || '').trim();
+    function usuarioDesdeCliente(cliente) {
+        const cfg = CONFIG.validador || {};
         return {
-            NumeroIntentos: 5,
-            ValidaConTipoId: false,
-            ValidaFechaNacimiento: false,
-            LimiteEdad: 0,
-            ValidaPromediosEspera: false,
-            InfoServicioWeb: token,
-            ValidaConServicioProveedores: true,
-            ModoWebPlayer: true,
+            IdTipoCliente: String(cliente.tipoPersona || '1'),
+            IdTipoDocumento: String(cfg.idTipoDocumento || '2'),
+            Nombre: String(cliente.nombre || ''),
+            Apellido: String(cliente.apellido || ''),
+            NumeroDocumento: String(cliente.cedula || '').replace(/\D/g, ''),
+            CorreoElectronico: String(cliente.email || ''),
+            Celular: String(cliente.celular || ''),
+            Telefono: null,
+            Direccion: String(cfg.direccionMascara || '********************'),
+            IdCiudad: 0,
+            IdEstado: 0,
+            AceptaPoliticaDatos: true,
         };
     }
 
-    // Digiturno5 Validacion: solo cédula + tipo doc. Persona viene de DIAN.
-    async function postValidacionPorDocumento(numeroDocumento, idTipoDocumento) {
+    async function reservarYCrear(cliente, cola, fechaIso, slot) {
         const cfg = CONFIG.validador || {};
         const recurso = cfg.recurso || 'CitasDIAN';
-        const doc = String(numeroDocumento || '').trim();
-        const tipoDoc = String(idTipoDocumento || '2');
-        if (!doc) throw new Error('Validacion: falta número de documento');
-
-        const token = String(
-            ((cfg.pruebaPaso2 && cfg.pruebaPaso2.infoServicioWeb) || ''),
-        ).trim();
-        if (token.length < 40) throw new Error('Validacion: falta infoServicioWeb');
-
-        return postValidadorValidar(
-            {
-                Fuente: 'Validador',
-                Encontrado: false,
-                MensajeAdicional: '',
-                ObjetosEncontrados: [doc, tipoDoc],
-                DetalleAdicional: 'Validacion',
-                Recurso: recurso,
-            },
-            {
-                nombre: 'ValidadorDatos.Digiturno5',
-                configuracion: configDigiturno5(),
-            },
-        );
-    }
-
-    function primerValorLista(v) {
-        if (Array.isArray(v) && v.length) return v[0];
-        return v;
-    }
-
-    // Mapea respuesta Validacion → UsuarioCliente (como el player tras captcha).
-    function usuarioClienteDesdeValidacion(resp, ag) {
-        const p = (resp && resp.Persona) || {};
-        const nombre =
-            (p.Nombres && String(p.Nombres).trim()) ||
-            [p.PrimerNombre, p.SegundoNombre].filter(Boolean).join(' ').trim();
-        const apellido =
-            (p.Apellidos && String(p.Apellidos).trim()) ||
-            [p.PrimerApellido, p.SegundoApellido].filter(Boolean).join(' ').trim();
-        let correo =
-            (p.Email && String(p.Email).trim()) ||
-            (p.EmailUltimo && String(p.EmailUltimo).trim()) ||
-            '';
-        if (!correo) {
-            const c0 = primerValorLista(p.CorreosElectronicos);
-            if (c0 != null) correo = String(c0).trim();
-        }
-        let celular = '';
-        const cel0 = primerValorLista(p.TelefonosCelular);
-        if (cel0 != null && cel0 !== '') celular = String(cel0);
-        else if (p.Telefono != null && p.Telefono !== '') celular = String(p.Telefono);
-        else if (p.TelefonoUltimo != null && p.TelefonoUltimo !== '') {
-            celular = String(p.TelefonoUltimo);
-        }
-        const direccion =
-            (resp && resp.Direccion && String(resp.Direccion).trim()) ||
-            (p.Direccion && String(p.Direccion).trim()) ||
-            '';
-
-        return {
-            IdTipoCliente: String(
-                ((CONFIG.validador && CONFIG.validador.pruebaPaso2) || {}).tipoCliente || '1',
-            ),
-            IdTipoDocumento: String(ag.idTipoDocumento || '2'),
-            Nombre: nombre,
-            Apellido: apellido,
-            NumeroDocumento: String(ag.numeroDocumento || ''),
-            CorreoElectronico: correo || null,
-            Celular: celular || null,
-            Telefono: null,
-            Direccion: direccion || null,
-            IdCiudad: 0,
-            IdEstado: 0,
-            AceptaPoliticaDatos: true,
+        const token = tokenInfo();
+        const tipoVirt = String(cfg.tipoEspecialidadVirtual || '2');
+        const cita = plantillaCita(cliente.tipoPersona || '1', tipoVirt);
+        cita.Cola = {
+            IdEspecialidad: Number(cola.IdEspecialidad),
+            Nombre: cola.Nombre || null,
         };
-    }
+        cita.Fecha = fechaIso;
+        cita.Hora = slot.HoraAgenda;
+        cita.IdAgenda = slot.IdentificadoresAgendas;
+        cita.UsuarioCliente = usuarioDesdeCliente(cliente);
 
-    function citaParaAgendarPrueba(fechaIso, slot, usuarioCliente) {
-        const cita = citaParaPruebaPaso2(fechaIso);
-        cita.Hora = slot.HoraAgenda || slot.horaAgenda || cita.Hora;
-        cita.IdAgenda = slot.IdentificadoresAgendas || slot.idAgenda || 0;
-        cita.UsuarioCliente = usuarioCliente;
-        return cita;
-    }
-
-    function usuarioClienteDesdeConfigPrueba(ag) {
-        const p2 = (CONFIG.validador && CONFIG.validador.pruebaPaso2) || {};
-        return {
-            IdTipoCliente: String(p2.tipoCliente || '1'),
-            IdTipoDocumento: String(ag.idTipoDocumento || '2'),
-            Nombre: String(ag.nombre || ''),
-            Apellido: String(ag.apellido || ''),
-            NumeroDocumento: String(ag.numeroDocumento || ''),
-            CorreoElectronico: String(ag.correo || ''),
-            Celular: String(ag.celular || ''),
-            Telefono: null,
-            Direccion: String(ag.direccion || '********************'),
-            IdCiudad: 0,
-            IdEstado: 0,
-            AceptaPoliticaDatos: true,
-        };
-    }
-
-    // Sandbox: Fechas→Horas→[Validacion?]→Reserva→Creo.
-    // usarValidacion:false → PII fija de CONFIG (ofuscada HAR). Devuelve { ok, ... }.
-    async function probarAgendarConMascaras() {
-        const p2 = (CONFIG.validador && CONFIG.validador.pruebaPaso2) || {};
-        const ag = p2.agendarPrueba || {};
-        if (p2.activo === false || ag.activo === false) {
-            throw new Error('agendarPrueba desactivada en CONFIG');
-        }
-        const doc = String(ag.numeroDocumento || '').trim();
-        if (!doc) throw new Error('falta agendarPrueba.numeroDocumento');
-
-        const token = String(p2.infoServicioWeb || '').trim();
-        const recurso = (CONFIG.validador && CONFIG.validador.recurso) || 'CitasDIAN';
-        const conValidacion = ag.usarValidacion === true;
-
-        const paso2 = await probarPaso2FechasHoras();
-        if (paso2.error) return { ok: false, error: paso2.error, paso2 };
-        if (!paso2.horas || !paso2.horas.length) {
-            return { ok: false, error: 'sin horas para agendar', paso2 };
-        }
-
-        const slot = (paso2.slotsRaw && paso2.slotsRaw[0]) || paso2.horas[0];
-        const idAgenda = slot.IdentificadoresAgendas || slot.idAgenda;
-        const horaLabel = slot.Contenido || slot.contenido || slot.HoraAgenda || '';
-        log(
-            `   Agendar prueba: slot ${horaLabel} IdAgenda=${idAgenda} doc=${doc} ` +
-                `(${conValidacion ? 'vía Validacion' : 'PII fija, sin Validacion'})`,
-        );
-
-        let rValidacion = null;
-        let usuario;
-        if (conValidacion) {
-            log('   Agendar prueba: Validacion (Digiturno5)…');
-            rValidacion = await postValidacionPorDocumento(doc, ag.idTipoDocumento || '2');
-            if (!rValidacion.Encontrado) {
-                return {
-                    ok: false,
-                    paso: 'Validacion',
-                    error:
-                        'Validacion Encontrado=false (' +
-                        (rValidacion.DetalleAdicional ||
-                            rValidacion.MensajeAdicional ||
-                            rValidacion.ErrorString ||
-                            '') +
-                        ')',
-                    respuesta: rValidacion,
-                    paso2,
-                };
-            }
-            usuario = usuarioClienteDesdeValidacion(rValidacion, ag);
-            log(
-                `   Agendar prueba: Persona OK Nombre="${usuario.Nombre}" Apellido="${usuario.Apellido}" ` +
-                    `correo=${usuario.CorreoElectronico || '∅'} cel=${usuario.Celular || '∅'} ` +
-                    `det=${rValidacion.DetalleAdicional || ''}`,
-            );
-            if (!usuario.Nombre || !String(usuario.Nombre).trim()) {
-                return {
-                    ok: false,
-                    paso: 'Validacion',
-                    error: 'Validacion OK pero sin Nombre en Persona',
-                    respuesta: rValidacion,
-                    paso2,
-                };
-            }
-        } else {
-            usuario = usuarioClienteDesdeConfigPrueba(ag);
-            log(
-                `   Agendar prueba: PII fija Nombre="${usuario.Nombre}" Apellido="${usuario.Apellido}" ` +
-                    `correo=${usuario.CorreoElectronico} cel=${usuario.Celular} ` +
-                    `dir=${usuario.Direccion}`,
-            );
-            if (!usuario.Nombre || !String(usuario.Nombre).trim()) {
-                return { ok: false, paso: 'PII', error: 'falta nombre en agendarPrueba', paso2 };
-            }
-        }
-
-        const cita = citaParaAgendarPrueba(paso2.fechaConsultada, slot, usuario);
-        const objs = [JSON.stringify(cita), token, true];
-
-        log('   Agendar prueba: manejadorReservaAgenda…');
         const rReserva = await postValidadorValidar({
             Fuente: 'Validador',
             Encontrado: false,
             DetalleAdicional: 'manejadorReservaAgenda',
-            ObjetosEncontrados: objs,
+            ObjetosEncontrados: [JSON.stringify(cita), token, true],
             Recurso: recurso,
         });
-
         if (!rReserva.Encontrado) {
-            return {
-                ok: false,
-                paso: 'Reserva',
-                error:
-                    'Reserva Encontrado=false (' +
-                    (rReserva.DetalleAdicional ||
-                        rReserva.MensajeAdicional ||
-                        rReserva.ErrorString ||
-                        '') +
-                    ')',
-                respuesta: rReserva,
-                validacion: rValidacion,
-                paso2,
-            };
+            const err =
+                rReserva.ErrorString ||
+                rReserva.MensajeAdicional ||
+                rReserva.DetalleAdicional ||
+                'Reserva falló';
+            if (/máximo de citas|maximo de citas|excedió/i.test(String(err))) {
+                throw new ClienteConCita(err);
+            }
+            throw new Error('Reserva: ' + err);
         }
 
         const reservaObj = deserializarObjValidador(
             (rReserva.ObjetosEncontrados && rReserva.ObjetosEncontrados[0]) || null,
         );
-        const agendaId =
-            (reservaObj && reservaObj.AgendaDisponibleId) || cita.IdAgenda;
-        if (agendaId) cita.IdAgenda = agendaId;
-
-        log(`   Agendar prueba: Reserva OK AgendaDisponibleId=${agendaId || '?'}`);
-        log('   Agendar prueba: manejadorCreoCita…');
+        if (reservaObj && reservaObj.AgendaDisponibleId) {
+            cita.IdAgenda = reservaObj.AgendaDisponibleId;
+        }
 
         const rCreo = await postValidadorValidar({
             Fuente: 'Validador',
@@ -2665,453 +987,95 @@
             ObjetosEncontrados: [JSON.stringify(cita), token, true],
             Recurso: recurso,
         });
-
         if (!rCreo.Encontrado) {
-            return {
-                ok: false,
-                paso: 'CreoCita',
-                error:
-                    'CreoCita Encontrado=false (' +
-                    (rCreo.DetalleAdicional ||
-                        rCreo.MensajeAdicional ||
-                        rCreo.ErrorString ||
-                        '') +
-                    ')',
-                respuesta: rCreo,
-                reserva: rReserva,
-                validacion: rValidacion,
-                paso2,
-            };
+            const err =
+                rCreo.ErrorString ||
+                rCreo.MensajeAdicional ||
+                rCreo.DetalleAdicional ||
+                'CreoCita falló';
+            if (/máximo de citas|maximo de citas|excedió/i.test(String(err))) {
+                throw new ClienteConCita(err);
+            }
+            throw new Error('CreoCita: ' + err);
         }
 
-        const objsCreo = Array.isArray(rCreo.ObjetosEncontrados) ? rCreo.ObjetosEncontrados : [];
-        const codigoCita = objsCreo[0];
-        const idInterno = objsCreo[1];
-        log(`   Agendar prueba: CreoCita OK codigo=${codigoCita} id=${idInterno}`);
-
+        const objs = Array.isArray(rCreo.ObjetosEncontrados) ? rCreo.ObjetosEncontrados : [];
         return {
-            ok: true,
-            codigoCita,
-            idInterno,
-            slot: { contenido: horaLabel, idAgenda: agendaId, horaAgenda: cita.Hora },
-            fecha: paso2.fechaConsultada,
-            usuario,
-            validacion: rValidacion,
-            reserva: rReserva,
-            creo: rCreo,
-            paso2,
+            codigoCita: objs[0],
+            idInterno: objs[1],
+            fecha: fechaIso,
+            hora: slot.Contenido || slot.HoraAgenda,
+            idAgenda: cita.IdAgenda,
         };
     }
 
-    // Camino por clics (fallback o para sincronizar el DOM tras sondeo OK).
-    async function caminoHastaTramitePorClics(opts = {}) {
-        const timeout = CONFIG.timeoutElementoMs;
-        const selCat =
-            (CONFIG.reintento && CONFIG.reintento.selCategoria) ||
-            'div.boton.btnCategoria[llave="63071985-f5bd-43fe-beed-38f64c97371b"]';
-        const selVideo = 'div.boton.btnTipoAtencion[llave="2"]';
-        const tipo = tipoPersonaCiclo || '1';
+    // ─── Errores de control ──────────────────────────────────────────────────
 
-        if (!opts.desdeCategoria) {
-            if (!buscar('div.boton.btnTipoPersona[llave="1"], div.boton.btnTipoPersona[llave="2"]')) {
-                await clicCuandoVisible(
-                    'div[nombrecontrol="btnSolicitarCita"]',
-                    'Agendar cita',
-                    timeout,
-                );
-                await esperarSinCarga(Math.min(8000, timeout), { lanzarSinCupo: false });
-            }
-            await clicCuandoVisible(
-                `div.boton.btnTipoPersona[llave="${tipo}"]`,
-                `tipo persona llave=${tipo}`,
-                timeout,
-            );
-            log(`   tipo persona: ${tipo === '2' ? 'jurídica' : 'natural'} (llave=${tipo})`);
-            await clicCuandoVisible(selVideo, 'Videoatención', timeout);
-        }
+    function SinCupo(msg) {
+        this.name = 'SinCupo';
+        this.message = msg || 'sin cupo';
+    }
+    SinCupo.prototype = Object.create(Error.prototype);
 
-        await clicCuandoVisible(selCat, 'Devoluciones', timeout);
-        await revisarSinEspecialidades();
-        return true;
+    function ClienteConCita(msg) {
+        this.name = 'ClienteConCita';
+        this.message = msg || 'cliente con cita';
+    }
+    ClienteConCita.prototype = Object.create(Error.prototype);
+
+    function FinCola(msg) {
+        this.name = 'FinCola';
+        this.message = msg || 'cola vacía';
+    }
+    FinCola.prototype = Object.create(Error.prototype);
+
+    function esSinCupo(e) {
+        return e && (e.name === 'SinCupo' || e instanceof SinCupo);
+    }
+    function esClienteConCita(e) {
+        return e && (e.name === 'ClienteConCita' || e instanceof ClienteConCita);
+    }
+    function esFinCola(e) {
+        return e && (e.name === 'FinCola' || e instanceof FinCola);
     }
 
-    // 1) Sondeo Validador (rápido, sin DOM). 2) Si hay colas, clics para alinear el player.
-    // opts.desdeCategoria: soft-retry (UI ya en PasoUno).
-    async function caminoHastaTramite(opts = {}) {
-        const pendientes = cargarClientes().filter((c) => !c.scheduled);
-        const tipo = pendientes.length
-            ? normalizarTipoPersonaCliente(pendientes[0].tipoPersona)
-            : '1';
-        tipoPersonaCiclo = tipo;
+    // ─── Agendado / alarma ───────────────────────────────────────────────────
 
-        const usarValidador = CONFIG.validador && CONFIG.validador.activo !== false;
-        // Solo sondea si el blob ya se capturó (ciclo previo). Nunca hace seed-click:
-        // eso dejaba la UI en natural/jurídica ~20–30s y luego desfasaba el player.
-        if (usarValidador && configValidadorLista()) {
+    async function marcarAgendado({ date, hour, name, email } = {}) {
+        const clientes = cargarClientes();
+        const cedula = clienteActual && clienteActual.cedula;
+        if (cedula == null) return;
+        const idx = clientes.findIndex((c) => String(c.cedula) === String(cedula));
+        if (idx < 0) return;
+        const prev = clientes[idx];
+        clientes[idx] = {
+            ...prev,
+            scheduled: true,
+            cita: {
+                fecha: date || '',
+                hora: hour || '',
+                tramite: textoCiudadPreferida(prev),
+                agendadoEn: new Date().toISOString(),
+            },
+            name: name || prev.nombre,
+            email: email || prev.email,
+        };
+        guardarClientes(clientes);
+        if (CONFIG.sheet.activo && urlSheet()) {
             try {
-                log(`   Validador: sondeo con blob (${origenBlobValidador || 'listo'})`);
-                const sondeo = await sondearColasPorValidador(tipo);
-                if (sondeo.sinCupo) {
-                    log('   Validador: sin colas/trámites → reintento');
-                    throw new SinCupo('Validador: no hay colas para Devoluciones/video');
-                }
-                log(
-                    `   Validador: colas OK (${Array.isArray(sondeo.colas) ? sondeo.colas.length : '?'})`,
-                );
+                await actualizarClienteSheet({
+                    cedula,
+                    date: date || '',
+                    hour: hour || '',
+                    name: name || prev.nombre || '',
+                    email: email || prev.email || '',
+                    scheduled: true,
+                });
             } catch (e) {
-                if (esSinCupo(e)) throw e;
-                log(`   Validador falló (${e.message}); camino por clics`);
+                log('Sheet schedule falló: ' + e.message);
             }
-        } else if (usarValidador) {
-            instalarHookValidador();
-            log('   Validador: sin blob → clics (pega en panel o espera hook)');
         }
-
-        return caminoHastaTramitePorClics(opts);
     }
-
-    // La lista de trámites cambia en cada ciclo. Se recorre la cola y se queda con
-    // el primer pendiente cuya ciudadTramite esté entre las opciones.
-    async function elegirTramite() {
-        const sel = 'div[nombrecontrol="Servicios"] select.customSelect';
-        const select = await esperarElemento(sel, null, CONFIG.timeoutElementoMs);
-        if (!select) {
-            throw new SinCupo('No apareció el trámite');
-        }
-        select.scrollIntoView({ block: 'center' });
-
-        const tipoCiclo = tipoPersonaCiclo || '1';
-        const pendientes = cargarClientes().filter(
-            (c) => !c.scheduled && normalizarTipoPersonaCliente(c.tipoPersona) === tipoCiclo,
-        );
-        if (!pendientes.length) {
-            const otros = cargarClientes().filter((c) => !c.scheduled);
-            if (!otros.length) throw new FinCola('Todos los clientes ya están agendados');
-            throw new SinCupo(
-                `sin pendientes tipoPersona=${tipoCiclo} (hay ${otros.length} de otro tipo)`,
-            );
-        }
-
-        const limite = Date.now() + CONFIG.timeoutElementoMs;
-        let opciones = Array.from(select.options).filter((o) => o.value !== '');
-        let clics = 0;
-        while (!opciones.length && Date.now() < limite) {
-            // Un clic por cada silencio, no en cada sondeo: repetirlo cierra la
-            // lista que acaba de abrir y la carga vuelve a empezar.
-            if (clics < 3) {
-                select.focus();
-                clicar(select);
-                clics++;
-            }
-            await dormir(150);
-            opciones = Array.from(select.options).filter((o) => o.value !== '');
-        }
-        if (!opciones.length) {
-            throw new SinCupo('el trámite no cargó opciones');
-        }
-
-        log(`   opciones de trámite: ${opciones.length}`);
-        const textos = opciones.map((o) => ({ opcion: o, texto: limpiarTramite(o.textContent) }));
-        for (const cliente of pendientes) {
-            // Arreglo = preferencias en orden; string = un solo candidato.
-            const candidatos = Array.isArray(cliente.ciudadTramite)
-                ? cliente.ciudadTramite
-                : [cliente.ciudadTramite];
-
-            let hallado = null;
-            for (const candidato of candidatos) {
-                const objetivo = limpiarTramite(candidato);
-                hallado = textos.find((t) => t.texto.includes(objetivo));
-                if (hallado) break;
-            }
-
-            if (!hallado) {
-                log(`   ${cliente.cedula} sin opción para ${JSON.stringify(candidatos)}`);
-                continue;
-            }
-
-            select.value = hallado.opcion.value;
-            disparar(select, ['input', 'change']);
-            select.blur();
-            clienteActual = cliente;
-            datosPersonaActual = { nombre: '', correo: '' };
-            log(`   cliente ${cliente.cedula}: ${hallado.opcion.textContent.trim()}`);
-            // Sonido ya: el operario se prepara. El título CUPOS espera a fecha
-            // y hora para que el AHK no busque la casilla todavía.
-            alarma('Trámite coincidente. Prepárate para el captcha.', { titulo: false });
-            log('trámite coincidente → alarma sonora');
-            return true;
-        }
-
-        throw new SinCupo('ningún cliente pendiente coincide con los trámites disponibles');
-    }
-
-    // Una consulta limpia por intento: blur + clic afuera, sin reconsultar cada
-    // 1 s (eso vaciaba el token y dejaba el PasoTres a medias).
-    async function escribirDocumento() {
-        if (!clienteActual) throw new Error('No hay un cliente seleccionado para el documento');
-
-        const { intentosDocumento } = CONFIG.faseFinal;
-        const timeoutConsulta =
-            (CONFIG.documento && CONFIG.documento.timeoutConsultaMs) || 90000;
-        const selNumero =
-            (CONFIG.documento && CONFIG.documento.selNumero) ||
-            '#divPasoTresNumeroDocumento input';
-        const selRespuesta =
-            'div[nombrecontrol="DatosCorretos"] input[type="radio"][value="1"]';
-        const respondio = () => !!primeroVisible(selRespuesta);
-
-        for (let intento = 1; intento <= intentosDocumento; intento++) {
-            // Solo bloquea si NUNCA se resolvió captcha en este ciclo.
-            await asegurarCaptchaVigente();
-            await asegurarTipoDocumento(CONFIG.timeoutElementoMs);
-
-            const campo = await esperarElemento(selNumero, null, CONFIG.timeoutElementoMs);
-            if (!campo) break;
-            if (intento > 1) log(`   la consulta del documento no respondió; intento ${intento}`);
-
-            asegurarNumeroDocumento({ forzarConsulta: true });
-            await esperarSinCarga();
-
-            const limiteEspera = Date.now() + timeoutConsulta;
-            let aviso = 0;
-            while (Date.now() < limiteEspera) {
-                if (respondio()) {
-                    log('   DatosCorretos visible tras consulta');
-                    return;
-                }
-                await registrarSiModalCitaConfirmada();
-                // Si el player borró el número, una sola reposición (no cada tick).
-                const actual = document.querySelector(selNumero);
-                if (
-                    actual &&
-                    String(actual.value || '').trim() !== String(clienteActual.cedula) &&
-                    (visibleEnPantalla(actual) ||
-                        visibleEnPantalla(actual.closest('#divPasoTresNumeroDocumento') || actual))
-                ) {
-                    log('   el player vació la cédula; se reescribe una vez');
-                    asegurarNumeroDocumento({ forzarConsulta: true });
-                    await esperarSinCarga();
-                } else if (
-                    document.querySelector(CONFIG.documento.selTipo) &&
-                    visibleEnPantalla(document.querySelector(CONFIG.documento.selTipo)) &&
-                    !tipoDocumentoActualOk(document.querySelector(CONFIG.documento.selTipo))
-                ) {
-                    reponerTipoDocumentoSiListo();
-                }
-                if (Date.now() - aviso > 15000) {
-                    aviso = Date.now();
-                    log(
-                        `   esperando respuesta del documento (${Math.ceil(
-                            (limiteEspera - Date.now()) / 1000,
-                        )} s)`,
-                    );
-                }
-                if (estaCargando()) {
-                    await dormir(200);
-                    continue;
-                }
-                await dormir(250);
-            }
-            if (respondio()) return;
-        }
-        if (!respondio()) throw fallaFaseFinal('La consulta del documento no responde');
-    }
-
-    // Al elegir el trámite la página puede responder con el modal de que no hay
-    // especialidades. Es un "no hay cupo" temprano: se cierra el aviso y se
-    // reintenta pronto, sin recorrer el resto del flujo.
-    async function revisarSinEspecialidades() {
-        const { timeoutMs, selServicios } = CONFIG.sinEspecialidades;
-        const selSvc = selServicios || 'div[nombrecontrol="Servicios"] select.customSelect';
-        const limite = Date.now() + timeoutMs;
-
-        while (Date.now() < limite) {
-            // Si el trámite ya tiene opciones, no hay modal que esperar.
-            const select = document.querySelector(selSvc);
-            if (select && Array.from(select.options).some((o) => o.value !== '')) return true;
-
-            recargarSiBloqueoSeguridad();
-            await reaccionarSiModalError();
-            await dormir(150);
-        }
-        return true;
-    }
-
-    async function ejecutarPaso(paso) {
-        if (paso.accion === 'caminoHastaTramite') {
-            await caminoHastaTramite({ desdeCategoria: !!paso.desdeCategoria });
-            await estabilizarTrasPaso(paso);
-            return true;
-        }
-
-        if (paso.accion === 'tramite') {
-            await elegirTramite();
-            await estabilizarTrasPaso(paso);
-            return true;
-        }
-
-        if (paso.accion === 'documento') {
-            await escribirDocumento();
-            await estabilizarTrasPaso(paso);
-            return true;
-        }
-
-        if (paso.accion === 'fechaYHora') {
-            await elegirFechaYHora();
-            await estabilizarTrasPaso(paso);
-            return true;
-        }
-
-        if (paso.accion === 'captcha') {
-            await esperarCaptcha();
-            await estabilizarTrasPaso(paso);
-            return true;
-        }
-
-        if (paso.accion === 'agendarCita') {
-            await agendarCitaYConfirmar();
-            return true;
-        }
-
-        if (paso.sel && /PasoDos.*btnSiguiente/.test(paso.sel)) {
-            await reafirmarHoraElegida();
-        }
-
-        const el = await esperarElemento(paso.sel, paso.contiene, CONFIG.timeoutElementoMs);
-        if (!el) {
-            if (paso.opcional) {
-                log(`paso opcional omitido: ${paso.desc || paso.sel}`);
-                return true;
-            }
-            throw new Error(`No apareció: ${paso.desc || paso.sel}`);
-        }
-
-        // Radio/checkbox ya en Sí: no reclicar ni forzar esperas largas.
-        if (paso.marcar && paso.omitirSiMarcado && el.checked) {
-            log('   ya estaba marcado, se omite');
-            await estabilizarTrasPaso(paso);
-            return true;
-        }
-
-        if (paso.sel && /PasoDos.*btnSiguiente/.test(paso.sel)) {
-            await reafirmarHoraElegida();
-        }
-
-        el.scrollIntoView({ block: 'center' });
-
-        if (paso.opcionContiene !== undefined || paso.primeraOpcion) {
-            // La primera opción de estos selects es un <option value=""> de relleno,
-            // así que "la primera" es en realidad la primera con valor.
-            const objetivo = paso.opcionContiene !== undefined ? normalizar(paso.opcionContiene) : null;
-            const coincide =
-                objetivo === null
-                    ? (o) => o.value !== ''
-                    : (o) => normalizar(o.textContent).includes(objetivo);
-
-            const opcion = await elegirOpcion(el, coincide, CONFIG.timeoutElementoMs);
-            if (!opcion) {
-                if (paso.opcional) {
-                    log(`paso opcional omitido: ${paso.desc || paso.sel}`);
-                    return true;
-                }
-                const motivo =
-                    objetivo === null
-                        ? 'No se cargó ninguna opción'
-                        : `Ninguna opción contiene "${paso.opcionContiene}"`;
-                throw new Error(`${motivo} en ${paso.desc || paso.sel}`);
-            }
-            log(`   opción elegida: ${opcion.textContent.trim()}`);
-        } else if (paso.valor !== undefined) {
-            el.value = paso.valor;
-            disparar(el, ['input', 'change']);
-        } else if (paso.texto !== undefined) {
-            el.focus();
-            el.value = paso.texto;
-            disparar(el, ['input', 'change', 'keyup']);
-            // La consulta del documento se dispara al salir del campo, que es el
-            // "clic afuera" de hacerlo a mano.
-            el.blur();
-            clicar(document.body);
-        } else if (paso.marcar) {
-            if (el.checked) {
-                log('   ya estaba marcado');
-            } else {
-                // Un clic sintético sí activa radios y checkboxes nativos, y de paso
-                // dispara los input/change que el player escucha.
-                clicar(el);
-                if (!el.checked) {
-                    el.checked = true;
-                    disparar(el, ['input', 'change']);
-                }
-            }
-        } else {
-            // El title de los días del calendario dice la fecha completa, útil
-            // para saber después qué quedó elegido.
-            if (el.title) log(`   ${el.title}`);
-            clicar(resolverObjetivo(el));
-        }
-
-        await estabilizarTrasPaso(paso);
-        return true;
-    }
-
-    // Tras Agendar: éxito (ModalInfoCita) o tope diario (ModalError) si ya tenía cita.
-    async function agendarCitaYConfirmar() {
-        const selOk =
-            'div[tipo="Control"][pantalla="ModalInfoCita"][nombre="btnAceptar"]';
-
-        const boton = await esperarElemento(SEL_AGENDAR, null, CONFIG.timeoutElementoMs);
-        if (!boton) throw fallaFaseFinal('No apareció Agendar cita');
-
-        datosPersonaActual = leerDatosPersona();
-        log(`   datos: ${datosPersonaActual.nombre || '?'} / ${datosPersonaActual.correo || '?'}`);
-
-        boton.scrollIntoView({ block: 'center' });
-        clicar(resolverObjetivo(boton));
-        log('   clic en Agendar cita');
-
-        // No se repite el clic en Agendar: un segundo envío podría volver como
-        // "máximo de citas" y registrarse mal. Si no responde, se avisa y se sigue
-        // atento: si la persona confirma la cita a mano, igual se registra.
-        const limite = Date.now() + CONFIG.timeoutElementoMs;
-        let limiteAyuda = 0;
-        for (;;) {
-            recargarSiBloqueoSeguridad();
-            // Max citas / otros ModalError: Aceptar y (marcar o esperar intervalo).
-            await reaccionarSiModalError();
-
-            const ok = primeroVisible(selOk);
-            if (ok) {
-                if (limiteAyuda) pararAlarma();
-                await marcarAgendado();
-                clicar(resolverObjetivo(ok));
-                log('   cita confirmada (ModalInfoCita)');
-                await esperarSinCarga(8000, { reaccionarModal: false });
-                await dormir(CONFIG.esperaTrasClicMs ?? 200);
-                return true;
-            }
-
-            if (!limiteAyuda) {
-                if (Date.now() >= limite) {
-                    limiteAyuda = Date.now() + CONFIG.faseFinal.esperaPersonaMs;
-                    const motivo = 'Agendar cita no respondió';
-                    pararAlarma();
-                    alarma(motivo);
-                    pintar(`${motivo}. Revisa la página; si confirmas la cita, el script la registra.`, true);
-                    log(`pidiendo ayuda: ${motivo}`);
-                }
-            } else if (Date.now() >= limiteAyuda) {
-                break;
-            }
-
-            await dormir(150);
-        }
-        pararAlarma();
-        throw new Error('No apareció confirmación ni aviso de máximo de citas');
-    }
-
-    // ───────────────────────────── DETECCIÓN Y ALARMA ─────────────────────────
 
     function detener(mensaje, opts = {}) {
         guardarEstado({ activo: false, ejecutando: false, ultimo: mensaje });
@@ -3120,9 +1084,6 @@
         alarma(mensaje, opts);
     }
 
-    // Sonido y título se pueden encender por separado (trámite vs fecha/hora).
-    let pararSonido = () => {};
-    let pararTitulo = () => {};
     function pararAlarma() {
         pararSonido();
         pararTitulo();
@@ -3149,31 +1110,14 @@
         }
 
         if (!conSonido) return;
-
         pararSonido();
         const temporizadores = [];
         let ctx = null;
-
         try {
             const AC = vistaPagina().AudioContext || vistaPagina().webkitAudioContext;
             ctx = new AC();
-            // Tras soft-retries largos Chrome deja el contexto suspendido.
             const intentarResume = () => ctx && ctx.resume && ctx.resume().catch(() => {});
             intentarResume();
-            if (ctx.state === 'suspended') {
-                log(
-                    'audio bloqueado por la política de autoplay del navegador; ' +
-                        'quedan la notificación y el título CUPOS',
-                );
-                let intentos = 0;
-                const idResume = setInterval(() => {
-                    intentos += 1;
-                    intentarResume();
-                    if (!ctx || ctx.state === 'running' || intentos > 10) clearInterval(idResume);
-                }, 1000);
-                temporizadores.push(idResume);
-            }
-
             const rafaga = () => {
                 if (!ctx || ctx.state === 'closed') return;
                 intentarResume();
@@ -3181,7 +1125,6 @@
                 for (let i = 0; i < bipsPorRafaga; i++) {
                     const osc = ctx.createOscillator();
                     const gan = ctx.createGain();
-                    // Seno + volumen medio: menos chillón que la onda cuadrada.
                     osc.type = 'sine';
                     osc.frequency.value = i % 2 ? 740 : 980;
                     gan.gain.setValueAtTime(0, t);
@@ -3194,17 +1137,14 @@
                     t += 0.4;
                 }
             };
-
             rafaga();
             temporizadores.push(setInterval(rafaga, segundosEntreRafagas * 1000));
         } catch (e) {
             log('sin audio: ' + e.message);
         }
-
         if (window.Notification && Notification.permission === 'granted') {
-            new Notification('Cupo disponible', { body: cuerpo });
+            new Notification('Cita agendada', { body: cuerpo });
         }
-
         pararSonido = () => {
             temporizadores.forEach(clearInterval);
             if (ctx) ctx.close().catch(() => {});
@@ -3212,254 +1152,143 @@
         };
     }
 
-    // ───────────────────────────────── CICLO ──────────────────────────────────
-
-    // Soft-retry reentra en el camino (solo Devoluciones→trámites), no desde Inicio.
-    function indicePasoCaminoHastaTramite() {
-        const idx = CONFIG.pasos.findIndex((p) => p.accion === 'caminoHastaTramite');
-        return idx >= 0 ? idx : 0;
-    }
-
-    function encontrarCategoria() {
-        const sel = (CONFIG.reintento && CONFIG.reintento.selCategoria) || '';
-        if (!sel) return null;
-        return buscar(sel) || Array.from(document.querySelectorAll(sel)).find(visibleEnPantalla) || null;
-    }
-
-    function categoriaVisible() {
-        return !!encontrarCategoria();
-    }
-
-    function inicioVisible() {
-        return !!buscar('div[nombrecontrol="btnSolicitarCita"]');
-    }
-
-    // Cierra un ModalError residual sin lanzar SinCupo (evita abortar el soft-retry).
-    async function descartarModalErrorSiHay() {
-        if (!pantallaOverlayVisible('ModalError')) return;
-        if (hayModalBloqueoSeguridad()) {
-            recargarSiBloqueoSeguridad();
-            return;
-        }
-        log('   cerrando modal residual');
-        await cerrarModalError();
-    }
-
-    // Prepara el DOM para reintentar sin recargar.
-    // Devuelve 'categoria' | 'inicio' | null (null = no queda más que recargar).
-    async function prepararReintentoSuave({ trasAgendar = false } = {}) {
-        if (trasAgendar) {
-            // Tras Aceptar la página vuelve sola al inicio; se le da un momento
-            // para pintarlo antes de dar el DOM por perdido y recargar.
-            await esperarSinCarga(10000, { lanzarSinCupo: false });
-            await esperarCualquiera(['div[nombrecontrol="btnSolicitarCita"]'], 8000);
-            if (inicioVisible()) return 'inicio';
-        }
-        await descartarModalErrorSiHay();
-        if (categoriaVisible()) return 'categoria';
-
-        const selAnt = (CONFIG.reintento && CONFIG.reintento.selAnterior) || '';
-        const max = (CONFIG.reintento && CONFIG.reintento.intentosAnterior) || 6;
-        for (let i = 0; i < max; i++) {
-            const ant = selAnt
-                ? buscar(selAnt) || Array.from(document.querySelectorAll(selAnt)).find(visibleEnPantalla)
-                : null;
-            if (!ant) break;
-            log(`   Anterior (${i + 1}/${max}) para volver a categoría`);
-            clicar(resolverObjetivo(ant));
-            await esperarSinCarga(8000, { lanzarSinCupo: false });
-            await dormir(CONFIG.esperaTrasClicMs ?? 200);
-            await descartarModalErrorSiHay();
-            if (categoriaVisible()) return 'categoria';
-        }
-
-        if (categoriaVisible()) return 'categoria';
-        // Tras Aceptar el player a veces vuelve al inicio del flujo: seguir sin recargar.
-        if (inicioVisible()) return 'inicio';
-        return null;
-    }
+    // ─── Ciclo POST ──────────────────────────────────────────────────────────
 
     function recargarInicio(motivo) {
-        softSeguidos = 0;
-        pararAlarma();
-        log(motivo || 'recarga a inicio');
-        guardarEstado({ ejecutando: false, reintentoSoft: false, proximo: Date.now() });
+        log('Recarga: ' + motivo);
+        guardarEstado({ ejecutando: false, reintentoSoft: false });
         location.href = CONFIG.urlInicio;
     }
 
-    async function ejecutarCiclo(opts = {}) {
-        const soft = !!opts.soft;
-        const estado = guardarEstado({
-            ejecutando: true,
-            ciclos: (leerEstado().ciclos || 0) + 1,
-            reintentoSoft: false,
+    function programarSiguiente(esperaMs = intervaloMs(), { soft = false } = {}) {
+        if (timerReintento) clearTimeout(timerReintento);
+        guardarEstado({
+            activo: true,
+            ejecutando: false,
+            reintentoSoft: !!soft,
+            proximo: Date.now() + esperaMs,
         });
-        pintar(`Ciclo ${estado.ciclos}${soft ? ' (suave)' : ''} en curso...`);
+        timerReintento = setTimeout(() => ejecutarCiclo({ soft }), esperaMs);
+        pintar(
+            soft
+                ? `Reintento soft en ${Math.round(esperaMs / 1000)}s…`
+                : `Siguiente ciclo en ${Math.round(esperaMs / 1000)}s…`,
+        );
+    }
 
-        let resultado;
-        let exito = false;
-        let esperaMs = intervaloMs();
-        let fueSinCupo = false;
+    async function ejecutarCiclo() {
+        const est = leerEstado();
+        if (!est.activo) return;
+        if (est.ejecutando) return;
+        guardarEstado({ ejecutando: true, ciclos: (est.ciclos || 0) + 1 });
+        pararAlarma();
+        clienteActual = null;
+
         try {
-            let pasos = CONFIG.pasos;
-            let softDesdeCategoria = false;
-            if (soft) {
-                const desde = await prepararReintentoSuave({ trasAgendar: !!opts.trasAgendar });
-                if (!desde) {
-                    recargarInicio('reintento suave: DOM no recuperable → recarga');
-                    return;
-                }
-                if (desde === 'categoria') {
-                    softDesdeCategoria = true;
-                    const idx = indicePasoCaminoHastaTramite();
-                    pasos = CONFIG.pasos.slice(idx).map((p, i) =>
-                        i === 0 && p.accion === 'caminoHastaTramite'
-                            ? { ...p, desdeCategoria: true }
-                            : p,
-                    );
-                } else {
-                    pasos = CONFIG.pasos;
-                }
-                log(`reintento suave desde: ${desde} → ${pasos[0].desc || pasos[0].sel}`);
+            if (!configValidadorLista()) {
+                throw new Error('sin blob Validador (pega en panel)');
             }
+            if (!tokenInfo()) throw new Error('falta infoServicioWeb en CONFIG');
 
-            const { clientes, confiable } = await sincronizarClientes();
+            pintar('Sincronizando Sheet…');
+            const clientes = await sincronizarClientes();
             const pendientes = clientes.filter((c) => !c.scheduled);
-            pintar(`Ciclo ${estado.ciclos}: ${pendientes.length} pendiente(s)...`);
             if (!pendientes.length) {
-                // Solo si la Sheet respondió: si falló la red y la caché quedó vacía
-                // o solo con agendados dudosos, no apagar el monitor como "fin de cola".
-                if (confiable) throw new FinCola('Todos los clientes ya están agendados');
-                throw new Error('sin pendientes en caché (la Sheet no confirmó el estado)');
+                detener('No hay clientes pendientes en la Sheet.', { sonido: false });
+                return;
             }
 
-            // Soft desde categoría no puede cambiar natural↔jurídica: hace falta
-            // volver a Solicitar cita. Recarga y el ciclo completo elige el tipo.
-            if (softDesdeCategoria) {
-                const tipoNecesario = normalizarTipoPersonaCliente(pendientes[0].tipoPersona);
-                if (tipoNecesario !== (tipoPersonaCiclo || '1')) {
-                    recargarInicio(
-                        `tipoPersona ${tipoPersonaCiclo}→${tipoNecesario}: recarga para elegir de nuevo`,
-                    );
-                    return;
-                }
+            const listos = pendientes.filter(clienteListoParaPost);
+            const sinPii = pendientes.length - listos.length;
+            if (sinPii > 0) {
+                log(`AVISO: ${sinPii} pendiente(s) sin nombre/apellido/email/celular enmascarados`);
+            }
+            if (!listos.length) {
+                throw new SinCupo(
+                    'ningún pendiente tiene PII enmascarada (nombre/apellido/email/celular)',
+                );
             }
 
-            // Tras el captcha la cita ya está a la vista: esos pasos insisten y
-            // piden ayuda en vez de abortar el ciclo.
-            let enFaseFinal = false;
-            for (const paso of pasos) {
-                log(`→ ${paso.desc || paso.sel}`);
-                if (enFaseFinal) await ejecutarPasoFinal(paso);
-                else await ejecutarPaso(paso);
-                if (paso.accion === 'captcha') enFaseFinal = true;
-            }
-            resultado = 'cita agendada, revisa el navegador y el correo';
-            exito = true;
+            const cliente = listos[0];
+            clienteActual = cliente;
+            log(
+                `Cliente ${cliente.cedula} · ${cliente.nombre} ${cliente.apellido} · tipo=${cliente.tipoPersona}`,
+            );
+
+            pintar('Resolviendo cola (EncontroColas)…');
+            const cola = await resolverColaPorTramite(cliente);
+            log(`Cola IdEspecialidad=${cola.IdEspecialidad} · ${cola.Nombre}`);
+
+            pintar('Consultando Fechas/Horas…');
+            const { fechaConsultada, slots } = await consultarFechasHoras(
+                cola,
+                cliente.tipoPersona,
+            );
+            const slot = slots[0];
+            log(
+                `Slot ${slot.Contenido || slot.HoraAgenda} → ${slot.IdentificadoresAgendas} (${slots.length} disponibles)`,
+            );
+
+            pintar('Reserva → Creo…');
+            const cita = await reservarYCrear(cliente, cola, fechaConsultada, slot);
             softSeguidos = 0;
 
-            // detener() apagó el monitor al llegar al captcha para no recargar el
-            // formulario. Con la cita ya hecha, si queda gente en la cola se enciende
-            // otra vez; tras Aceptar la página vuelve sola al inicio, así que se
-            // sigue sin recargar.
-            if (seguirConSiguienteCliente(estado, resultado)) return;
-            resultado = 'cita agendada. No quedan clientes pendientes';
+            await marcarAgendado({
+                date: cita.fecha,
+                hour: cita.hora,
+                name: `${cliente.nombre} ${cliente.apellido}`.trim(),
+                email: cliente.email,
+            });
+
+            const msg = `Cita ${cita.codigoCita} · ${cita.hora} · ${cliente.cedula}`;
+            log('OK ' + msg);
+            alarma(msg, { sonido: true });
+
+            const quedan = cargarClientes().filter((c) => !c.scheduled && clienteListoParaPost(c));
+            if (quedan.length) {
+                const espera = (CONFIG.segundosAntesDelSiguienteCliente || 0) * 1000;
+                pintar(msg + ` · quedan ${quedan.length}`, true);
+                programarSiguiente(Math.max(espera, 2000), { soft: false });
+            } else {
+                detener(msg + ' · cola completa', { sonido: false });
+            }
         } catch (e) {
-            pararAlarma();
-            if (esBloqueoSeguridad(e)) return;
             if (esFinCola(e)) {
+                detener(e.message, { sonido: false });
+                return;
+            }
+            if (esClienteConCita(e)) {
+                log('Cliente con cita: ' + e.message);
+                await marcarAgendado({ date: '', hour: '' });
                 softSeguidos = 0;
-                guardarEstado({ activo: false, ejecutando: false, ultimo: e.message });
-                pintar(e.message, true);
-                refrescarBoton();
+                programarSiguiente(1000, { soft: false });
                 return;
             }
-            // Tope diario: ya se marcó scheduled en Sheet; mismo camino que éxito.
-            if (esClienteYaAgendado(e)) {
-                softSeguidos = 0;
-                resultado = e.message;
-                exito = true;
-                if (seguirConSiguienteCliente(estado, resultado)) return;
-                guardarEstado({ activo: false, ejecutando: false, ultimo: resultado });
-                pintar(`Ciclo ${estado.ciclos}: ${resultado}. No quedan pendientes.`, true);
-                refrescarBoton();
+            if (esSinCupo(e)) {
+                softSeguidos += 1;
+                log(`Sin cupo (${softSeguidos}/${softMaxSeguidos()}): ${e.message}`);
+                if (softSeguidos >= softMaxSeguidos()) {
+                    softSeguidos = 0;
+                    recargarInicio('soft máx sin cupo');
+                    return;
+                }
+                programarSiguiente(intervaloMs(), { soft: true });
                 return;
             }
-            fueSinCupo = esSinCupo(e);
-            resultado = fueSinCupo ? `sin cupo (${e.message})` : `falló: ${e.message}`;
-            if (!fueSinCupo) softSeguidos = 0;
-            log(`fin ciclo: ${resultado}${fueSinCupo ? ' [SinCupo→soft]' : ' [error→recarga]'}`);
-        }
-
-        // detener() apagó el monitor al haber fecha y hora, para no recargar el
-        // formulario. Si el ciclo falló después, el cupo ya no sirve: se enciende
-        // de nuevo y se reintenta. Si fue bien, se deja apagado (o lo reenciende
-        // seguirConSiguienteCliente).
-        if (!leerEstado().activo) {
-            if (!exito) {
-                guardarEstado({ activo: true, ejecutando: false });
-                refrescarBoton();
-            } else {
-                pintar(`Ciclo ${estado.ciclos}: ${resultado}`, exito);
-                return;
-            }
-        }
-
-        const maxSoft = softMaxSeguidos();
-        let usarSoft = false;
-        if (fueSinCupo) {
             softSeguidos += 1;
-            if (softSeguidos > maxSoft) {
+            log(`Error ciclo (${softSeguidos}): ${(e && e.message) || e}`);
+            if (softSeguidos >= softMaxSeguidos()) {
                 softSeguidos = 0;
-                usarSoft = false;
-                log(`agotados ${maxSoft} reintentos suaves → recarga`);
-            } else {
-                usarSoft = true;
+                recargarInicio('soft máx error');
+                return;
             }
+            programarSiguiente(intervaloMs(), { soft: true });
+        } finally {
+            guardarEstado({ ejecutando: false });
         }
-
-        const segundos = Math.round(esperaMs / 1000);
-        const modo = usarSoft ? 'suave (sin recargar)' : 'con recarga';
-        pintar(`Ciclo ${estado.ciclos}: ${resultado}. Reintento ${modo} en ${segundos} s.`);
-        programarSiguiente(esperaMs, { soft: usarSoft });
     }
 
-    // Tras agendar (o tras el aviso de que el cliente ya tenía cita) se enciende
-    // de nuevo el monitor y se sigue sin recargar. Devuelve false si no quedan.
-    function seguirConSiguienteCliente(estado, resultado) {
-        if (!cargarClientes().some((c) => !c.scheduled)) return false;
-        softSeguidos = 0;
-        const segundos = CONFIG.segundosAntesDelSiguienteCliente;
-        guardarEstado({ activo: true, ejecutando: false, ultimo: resultado });
-        refrescarBoton();
-        pintar(`Ciclo ${estado.ciclos}: ${resultado}. Siguiente cliente en ${segundos} s.`, true);
-        programarSiguiente(segundos * 1000, { soft: true, trasAgendar: true });
-        return true;
-    }
-
-    function programarSiguiente(esperaMs = intervaloMs(), { soft = false, trasAgendar = false } = {}) {
-        guardarEstado({
-            ejecutando: false,
-            proximo: Date.now() + esperaMs,
-            reintentoSoft: !!soft,
-        });
-        if (timerReintento) clearTimeout(timerReintento);
-        timerReintento = setTimeout(() => {
-            timerReintento = null;
-            if (!leerEstado().activo) return;
-            if (soft) {
-                log('disparo reintento suave (sin location.href)');
-                ejecutarCiclo({ soft: true, trasAgendar });
-            } else {
-                recargarInicio('disparo reintento con recarga');
-            }
-        }, esperaMs);
-    }
-
-    // ─────────────────────────────── PANEL / LOG ──────────────────────────────
-
-    let $panel, $estado;
-    let refrescarBoton = () => {};
+    // ─── Panel ───────────────────────────────────────────────────────────────
 
     function log(msg) {
         console.log('[scheduler]', msg);
@@ -3470,7 +1299,7 @@
             arr.push(linea);
             localStorage.setItem(CLAVE_LOG, JSON.stringify(arr.slice(-80)));
         } catch {
-            /* ignore quota / JSON issues */
+            /* ignore */
         }
     }
 
@@ -3485,12 +1314,10 @@
         $panel = document.createElement('div');
         $panel.style.cssText =
             'position:fixed;z-index:999999;right:12px;bottom:12px;background:#fff;border:1px solid #999;' +
-            'border-radius:8px;padding:10px 12px;font:12px/1.4 system-ui,sans-serif;box-shadow:0 2px 10px rgba(0,0,0,.25);max-width:320px';
+            'border-radius:8px;padding:10px 12px;font:12px/1.4 system-ui,sans-serif;box-shadow:0 2px 10px rgba(0,0,0,.25);max-width:340px';
 
         const titulo = document.createElement('strong');
-        const p2Cfg = (CONFIG.validador && CONFIG.validador.pruebaPaso2) || {};
-        titulo.textContent =
-            p2Cfg.activo !== false ? 'Super Scheduler · Paso2 prueba' : 'Super Scheduler';
+        titulo.textContent = 'Super Scheduler · POST';
 
         $estado = document.createElement('div');
         $estado.style.margin = '6px 0';
@@ -3498,95 +1325,8 @@
         const botones = document.createElement('div');
         botones.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap';
 
-        const boton = document.createElement('button');
-        boton.style.cssText = 'cursor:pointer;padding:4px 10px;border:1px solid #666;border-radius:4px;background:#f3f3f3';
-
-        const botonPaso2 = document.createElement('button');
-        botonPaso2.textContent = 'Paso2 prueba';
-        botonPaso2.title =
-            'Fechas→Horas por Validador (IdEspecialidad de CONFIG). Solo consulta IdAgenda; no Reserva/Creo.';
-        botonPaso2.style.cssText = boton.style.cssText;
-        botonPaso2.style.display = p2Cfg.activo === false ? 'none' : '';
-        botonPaso2.onclick = async () => {
-            botonPaso2.disabled = true;
-            pintar('Paso2 prueba: consultando Fechas/Horas…');
-            try {
-                const r = await probarPaso2FechasHoras();
-                if (r.error) {
-                    pintar(`Paso2: ${r.error}`);
-                } else if (!r.horas || !r.horas.length) {
-                    pintar(
-                        `Paso2: fechas=${(r.fechas || []).length} pero sin horas ` +
-                            `(${r.fechaConsultada || '?'})`,
-                    );
-                } else {
-                    const preview = r.horas
-                        .slice(0, 3)
-                        .map((h) => `${h.contenido}:${String(h.idAgenda).slice(0, 8)}…`)
-                        .join(' · ');
-                    pintar(
-                        `Paso2 OK: ${r.horas.length} hora(s) el ${r.fechaConsultada || '?'} · ${preview}`,
-                        true,
-                    );
-                    try {
-                        const win = vistaPagina();
-                        win.__ssPaso2Ultimo = r;
-                    } catch (_) {
-                        /* ignore */
-                    }
-                }
-            } catch (e) {
-                pintar(`Paso2 error: ${(e && e.message) || e}`);
-            } finally {
-                botonPaso2.disabled = false;
-            }
-        };
-
-        const botonAgendarPrueba = document.createElement('button');
-        botonAgendarPrueba.textContent = 'Agendar prueba';
-        botonAgendarPrueba.title =
-            'Fechas→Horas→Reserva→Creo con PII ofuscada fija (sin Validacion). Puede crear cita real.';
-        botonAgendarPrueba.style.cssText = boton.style.cssText;
-        const agCfg = p2Cfg.agendarPrueba || {};
-        botonAgendarPrueba.style.display =
-            p2Cfg.activo === false || agCfg.activo === false ? 'none' : '';
-        botonAgendarPrueba.onclick = async () => {
-            const doc = String((agCfg && agCfg.numeroDocumento) || '').trim();
-            const okConfirm = window.confirm(
-                '¿Agendar prueba por POST?\n\n' +
-                    'Cédula: ' +
-                    doc +
-                    '\nNombre/apellido/correo/cel: ofuscados fijos (HAR)\n' +
-                    'Dirección: máscara\nSin Validacion/captcha.\n\n' +
-                    'Puede crear una cita REAL si el backend acepta.',
-            );
-            if (!okConfirm) return;
-            botonAgendarPrueba.disabled = true;
-            botonPaso2.disabled = true;
-            pintar('Agendar prueba: Fechas→Horas→Reserva→Creo…');
-            try {
-                const r = await probarAgendarConMascaras();
-                try {
-                    const win = vistaPagina();
-                    win.__ssAgendarPruebaUltimo = r;
-                } catch (_) {
-                    /* ignore */
-                }
-                if (!r.ok) {
-                    pintar(`Agendar prueba FALLÓ en ${r.paso || '?'}: ${r.error || 'sin detalle'}`);
-                } else {
-                    pintar(
-                        `Agendar prueba OK: cita ${r.codigoCita} · ${r.slot && r.slot.contenido} · ${r.fecha}`,
-                        true,
-                    );
-                }
-            } catch (e) {
-                pintar(`Agendar prueba error: ${(e && e.message) || e}`);
-            } finally {
-                botonAgendarPrueba.disabled = false;
-                botonPaso2.disabled = false;
-            }
-        };
+        const estiloBtn =
+            'cursor:pointer;padding:4px 10px;border:1px solid #666;border-radius:4px;background:#f3f3f3';
 
         const $blobEstado = document.createElement('div');
         $blobEstado.style.cssText = 'margin:4px 0 0;color:#555;font-size:11px';
@@ -3597,8 +1337,7 @@
         const bloqueBlob = document.createElement('div');
         bloqueBlob.style.cssText = 'display:none;margin-top:8px;';
         const areaBlob = document.createElement('textarea');
-        areaBlob.placeholder =
-            'Pega el Payload de ValidadorValidar (vale el de DevTools) o solo configuracion';
+        areaBlob.placeholder = 'Pega Payload ValidadorValidar o configuracion JSON';
         areaBlob.style.cssText =
             'width:100%;min-height:72px;box-sizing:border-box;font:11px/1.3 ui-monospace,monospace;' +
             'border:1px solid #bbb;border-radius:4px;padding:4px;resize:vertical';
@@ -3606,185 +1345,114 @@
         filaBlob.style.cssText = 'display:flex;gap:6px;margin-top:4px;flex-wrap:wrap';
         const btnGuardarBlob = document.createElement('button');
         btnGuardarBlob.textContent = 'Guardar blob';
-        btnGuardarBlob.style.cssText = boton.style.cssText;
+        btnGuardarBlob.style.cssText = estiloBtn;
         btnGuardarBlob.onclick = () => {
-            const texto = areaBlob.value.trim();
-            if (!texto) {
-                pintar('Blob vacío: pega el payload primero.');
-                return;
-            }
-            const parsed = parseTextoBlobValidador(texto);
-            if (!parsed) {
-                pintar('Blob inválido: no se pudo leer (JSON o Payload DevTools).');
-                return;
-            }
-            if (!persistirConfigValidador(parsed, 'pegado')) {
-                pintar('Blob inválido: falta ConfiguracionServicioRestEncriptado.');
+            const parsed = parseTextoBlobValidador(areaBlob.value.trim());
+            if (!parsed || !persistirConfigValidador(parsed, 'pegado')) {
+                pintar('Blob inválido.');
                 return;
             }
             areaBlob.value = '';
             bloqueBlob.style.display = 'none';
-            pintar('Blob Validador guardado en este navegador.');
-            refrescarEstadoBlob();
+            pintar('Blob guardado.');
         };
         const btnBorrarBlob = document.createElement('button');
         btnBorrarBlob.textContent = 'Borrar blob';
-        btnBorrarBlob.style.cssText = boton.style.cssText;
+        btnBorrarBlob.style.cssText = estiloBtn;
         btnBorrarBlob.onclick = () => {
             borrarBlobValidador();
-            areaBlob.value = '';
-            pintar('Blob Validador borrado.');
+            asegurarBlobFallback();
+            pintar('Blob borrado (queda fallback si hay).');
         };
         filaBlob.append(btnGuardarBlob, btnBorrarBlob);
         bloqueBlob.append(areaBlob, filaBlob);
 
+        const boton = document.createElement('button');
+        boton.style.cssText = estiloBtn;
         const botonBlob = document.createElement('button');
         botonBlob.textContent = 'Blob…';
-        botonBlob.title = 'Pegar o borrar el blob del Validador (localStorage)';
-        botonBlob.style.cssText = boton.style.cssText;
+        botonBlob.style.cssText = estiloBtn;
         botonBlob.onclick = () => {
             const abierto = bloqueBlob.style.display !== 'none';
             bloqueBlob.style.display = abierto ? 'none' : 'block';
             if (!abierto) {
-                const guardado = cargarBlobValidadorGuardado();
-                areaBlob.value = guardado ? JSON.stringify(guardado, null, 0) : '';
-                areaBlob.focus();
+                const g = cargarBlobValidadorGuardado();
+                areaBlob.value = g ? JSON.stringify(g) : '';
             }
         };
 
-        const botonExportar = document.createElement('button');
-        botonExportar.textContent = 'Exportar citas';
-        botonExportar.style.cssText = boton.style.cssText;
-        botonExportar.onclick = () => exportarCitas();
-
         const botonSheet = document.createElement('button');
         botonSheet.textContent = 'Sheet URL';
-        botonSheet.style.cssText = boton.style.cssText;
+        botonSheet.style.cssText = estiloBtn;
         botonSheet.onclick = () => {
             const actual = urlSheet();
-            const nueva = window.prompt('URL /exec del Apps Script (se guarda solo en este navegador):', actual);
+            const nueva = window.prompt('URL /exec Apps Script:', actual);
             if (nueva === null) return;
             const limpia = nueva.trim();
             if (limpia) localStorage.setItem(CLAVE_SHEET_URL, limpia);
             else localStorage.removeItem(CLAVE_SHEET_URL);
-            pintar(limpia ? 'URL de Sheet guardada en este navegador.' : 'URL de Sheet borrada.');
+            pintar(limpia ? 'URL Sheet guardada.' : 'URL Sheet borrada.');
         };
 
         const selectCiudad = document.createElement('select');
-        selectCiudad.style.cssText =
-            'cursor:pointer;padding:4px 8px;border:1px solid #666;border-radius:4px;background:#f3f3f3;max-width:140px';
-        const opcionVacia = document.createElement('option');
-        opcionVacia.value = '';
-        opcionVacia.textContent = 'Ciudad…';
-        selectCiudad.appendChild(opcionVacia);
+        selectCiudad.style.cssText = estiloBtn + ';max-width:140px';
+        selectCiudad.appendChild(new Option('Ciudad…', ''));
         for (const ciudad of CONFIG.sheet.ciudades || []) {
-            const op = document.createElement('option');
-            op.value = ciudad;
-            op.textContent = ciudad;
-            selectCiudad.appendChild(op);
+            selectCiudad.appendChild(new Option(ciudad, ciudad));
         }
         selectCiudad.value = nombreHoja();
         if (nombreHoja() && selectCiudad.value !== nombreHoja()) {
-            // Ciudad guardada que no está en la lista: se añade para no perderla.
-            const opExtra = document.createElement('option');
-            opExtra.value = nombreHoja();
-            opExtra.textContent = nombreHoja();
-            selectCiudad.appendChild(opExtra);
+            selectCiudad.appendChild(new Option(nombreHoja(), nombreHoja()));
             selectCiudad.value = nombreHoja();
         }
         selectCiudad.onchange = () => {
-            const limpia = selectCiudad.value.trim();
-            if (limpia) localStorage.setItem(CLAVE_HOJA, limpia);
+            const v = selectCiudad.value.trim();
+            if (v) localStorage.setItem(CLAVE_HOJA, v);
             else localStorage.removeItem(CLAVE_HOJA);
-            const cola = nombreCola();
-            pintar(
-                limpia
-                    ? `Ciudad/hoja: ${limpia}${cola ? ` · cola ${cola}` : ''}`
-                    : 'Ciudad/hoja borrada.',
-            );
+            pintar(v ? `Ciudad: ${v}` : 'Ciudad borrada.');
         };
 
         const selectCola = document.createElement('select');
-        selectCola.style.cssText =
-            'cursor:pointer;padding:4px 8px;border:1px solid #666;border-radius:4px;background:#f3f3f3;max-width:90px';
-        selectCola.title = 'Cola dentro de la ciudad (columna cola en la Sheet). Vacío = toda la hoja.';
-        const opcionColaTodas = document.createElement('option');
-        opcionColaTodas.value = '';
-        opcionColaTodas.textContent = 'Cola…';
-        selectCola.appendChild(opcionColaTodas);
+        selectCola.style.cssText = estiloBtn + ';max-width:90px';
+        selectCola.appendChild(new Option('Cola…', ''));
         for (const cola of CONFIG.sheet.colas || ['A', 'B', 'C']) {
-            const op = document.createElement('option');
-            op.value = cola;
-            op.textContent = `Cola ${cola}`;
-            selectCola.appendChild(op);
+            selectCola.appendChild(new Option(`Cola ${cola}`, cola));
         }
         selectCola.value = nombreCola();
-        if (nombreCola() && selectCola.value !== nombreCola()) {
-            const opExtra = document.createElement('option');
-            opExtra.value = nombreCola();
-            opExtra.textContent = `Cola ${nombreCola()}`;
-            selectCola.appendChild(opExtra);
-            selectCola.value = nombreCola();
-        }
         selectCola.onchange = () => {
-            const limpia = selectCola.value.trim();
-            if (limpia) localStorage.setItem(CLAVE_COLA, limpia);
+            const v = selectCola.value.trim();
+            if (v) localStorage.setItem(CLAVE_COLA, v);
             else localStorage.removeItem(CLAVE_COLA);
-            const hoja = nombreHoja();
-            pintar(
-                limpia
-                    ? `Cola ${limpia}${hoja ? ` · ${hoja}` : ''}`
-                    : `Cola: toda la hoja${hoja ? ` (${hoja})` : ''}`,
-            );
+            pintar(v ? `Cola ${v}` : 'Cola: toda la hoja');
         };
 
         const selectIntervalo = document.createElement('select');
-        selectIntervalo.style.cssText =
-            'cursor:pointer;padding:4px 8px;border:1px solid #666;border-radius:4px;background:#f3f3f3;max-width:100px';
-        selectIntervalo.title = 'Periodicidad entre reintentos';
+        selectIntervalo.style.cssText = estiloBtn + ';max-width:100px';
         for (const segs of CONFIG.intervalosSegundos || [5, 10, 15, 30, 45, 60]) {
-            const op = document.createElement('option');
-            op.value = String(segs);
-            op.textContent = `${segs} s`;
-            selectIntervalo.appendChild(op);
+            selectIntervalo.appendChild(new Option(`${segs} s`, String(segs)));
         }
         selectIntervalo.value = String(intervaloSegundos());
         selectIntervalo.onchange = () => {
-            const segs = Number(selectIntervalo.value);
-            localStorage.setItem(CLAVE_INTERVALO, String(segs));
-            pintar(`Reintento cada ${segs} s.`);
-            // Si hay una espera en curso, reprograma con el nuevo intervalo.
-            const est = leerEstado();
-            if (est.activo && !est.ejecutando && timerReintento) {
-                clearTimeout(timerReintento);
-                timerReintento = null;
-                programarSiguiente(intervaloMs(), { soft: !!est.reintentoSoft });
-            }
+            localStorage.setItem(CLAVE_INTERVALO, selectIntervalo.value);
+            pintar(`Reintento cada ${selectIntervalo.value}s.`);
         };
 
         const selectSoftMax = document.createElement('select');
-        selectSoftMax.style.cssText =
-            'cursor:pointer;padding:4px 8px;border:1px solid #666;border-radius:4px;background:#f3f3f3;max-width:110px';
-        selectSoftMax.title = 'Soft retries antes de recargar la página (default 20)';
+        selectSoftMax.style.cssText = estiloBtn + ';max-width:110px';
         for (const n of (CONFIG.reintento && CONFIG.reintento.softMaxOpciones) || [
             10, 20, 30, 50, 100,
         ]) {
-            const op = document.createElement('option');
-            op.value = String(n);
-            op.textContent = `Soft ${n}`;
-            selectSoftMax.appendChild(op);
+            selectSoftMax.appendChild(new Option(`Soft ${n}`, String(n)));
         }
         selectSoftMax.value = String(softMaxSeguidos());
         selectSoftMax.onchange = () => {
-            const n = Number(selectSoftMax.value);
-            localStorage.setItem(CLAVE_SOFT_MAX, String(n));
-            pintar(`Soft retry máx: ${n} (luego recarga).`);
+            localStorage.setItem(CLAVE_SOFT_MAX, selectSoftMax.value);
+            pintar(`Soft máx: ${selectSoftMax.value}`);
         };
 
         refrescarBoton = () => {
             boton.textContent = leerEstado().activo ? 'Detener' : 'Iniciar';
         };
-
         boton.onclick = async () => {
             if (leerEstado().activo) {
                 if (timerReintento) {
@@ -3792,14 +1460,17 @@
                     timerReintento = null;
                 }
                 softSeguidos = 0;
+                pararAlarma();
                 guardarEstado({ activo: false, reintentoSoft: false, proximo: 0 });
                 pintar('Detenido.');
             } else {
-                if (window.Notification && Notification.permission === 'default') await Notification.requestPermission();
+                if (window.Notification && Notification.permission === 'default') {
+                    await Notification.requestPermission();
+                }
                 softSeguidos = 0;
                 localStorage.removeItem(claveSync());
                 guardarEstado({ activo: true, ciclos: 0, proximo: 0, reintentoSoft: false });
-                pintar('Iniciando...');
+                pintar('Iniciando POST…');
                 ejecutarCiclo();
             }
             refrescarBoton();
@@ -3808,9 +1479,6 @@
         refrescarBoton();
         botones.append(
             boton,
-            botonPaso2,
-            botonAgendarPrueba,
-            botonExportar,
             botonSheet,
             botonBlob,
             selectCiudad,
@@ -3820,39 +1488,23 @@
         );
         $panel.append(titulo, $estado, $blobEstado, botones, bloqueBlob);
         document.body.appendChild($panel);
-        // Precarga blob guardado (pegado/hook de sesión anterior).
         configValidadorLista();
         refrescarEstadoBlob();
     }
 
-    // ────────────────────────────────── ARRANQUE ──────────────────────────────
+    // ─── Arranque ────────────────────────────────────────────────────────────
 
     instalarHookValidador();
     crearPanel();
 
     const estado = leerEstado();
     if (!estado.activo) {
-        pintar('Inactivo. Pulsa Iniciar.');
+        pintar('Inactivo. Pulsa Iniciar (solo POST).');
     } else if (!estado.proximo || Date.now() >= estado.proximo) {
-        // Tras una recarga de página el DOM del flujo no está: ciclo completo.
         ejecutarCiclo();
     } else {
-        const resta = Math.max(0, estado.proximo - Date.now());
-        const softPendiente = !!estado.reintentoSoft;
-        pintar(
-            `En espera: próximo intento ${softPendiente ? 'suave ' : ''}en ${Math.ceil(resta / 1000)} s.`,
-        );
-        if (timerReintento) clearTimeout(timerReintento);
-        timerReintento = setTimeout(() => {
-            timerReintento = null;
-            if (!leerEstado().activo) return;
-            // Soft: intentar reutilizar el DOM. Solo recargar si preparar falla.
-            if (leerEstado().reintentoSoft) {
-                log('arranque: reintento suave pendiente');
-                ejecutarCiclo({ soft: true });
-            } else {
-                recargarInicio('arranque: reintento con recarga');
-            }
-        }, resta);
+        programarSiguiente(Math.max(0, estado.proximo - Date.now()), {
+            soft: !!estado.reintentoSoft,
+        });
     }
 })();

@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Super Scheduler (sandbox)
 // @namespace    super-scheduler
-// @version      1.53-sandbox
-// @description  [SANDBOX] Paso2 Fechas/Horas + prueba Reserva/Creo con PII enmascarada
+// @version      1.54-sandbox
+// @description  [SANDBOX] Agendar prueba: Fechas/Horas → Validacion → Reserva/Creo
 // @match        https://agendamiento.dian.gov.co/*
 // @run-at       document-idle
 // @grant        GM_xmlhttpRequest
@@ -76,17 +76,12 @@
                 // Fallback si no hay blob pegado/hook (mismo pack CitasDIAN del HAR).
                 blobEncriptado:
                     'n6ch/SV/k+dI4u2UFdFZt/brXMA9zVn5kM201dC5IYv7J3PpQUXUWqySuM59vvO2Emx2PVFvYTtaJ7Rd6sSsRSlPtbn2zrNctjIsohWmnJHvHUPuBieiBA0jm0eX62xUQ+6BFWhtYjg1ePMyZSQYL79D2dZBRPWvmBFKvDrg50aJU/0Tsgpc2oALqH1hAXFJfBsx+jJJ6QvEZWmJH+3a/g==',
-                // Prueba Reserva→Creo SIN Validacion: cédula en claro, resto máscaras.
-                // Si falla → habrá que añadir paso Digiturno5 Validacion.
+                // Prueba: Fechas/Horas → Digiturno5 Validacion (cédula) → Reserva/Creo.
+                // UsuarioCliente sale de Persona (DIAN), no del form/Sheet.
                 agendarPrueba: {
                     activo: true,
                     numeroDocumento: '1049616173',
                     idTipoDocumento: '2',
-                    nombre: '***** ******',
-                    apellido: '***** ******',
-                    correo: '****@****.com',
-                    celular: '**********',
-                    direccion: '********************',
                 },
             },
         },
@@ -2164,9 +2159,10 @@
 
     // Igual que monitor-dian: $.ajax en la página (no fetch). El endpoint rechaza
     // fetch "limpio" con 403 CSR: Invalid request; acepta el body estilo player.
-    async function postValidadorValidar(respuestaBase) {
+    // opts: { nombre, configuracion } para Digiturno5 Validacion u otros.
+    async function postValidadorValidar(respuestaBase, opts = {}) {
         const cfg = CONFIG.validador || {};
-        const configuracion = asegurarConfigValidador();
+        const configuracion = opts.configuracion || asegurarConfigValidador();
         if (!configuracion) throw new Error('sin blob del Validador (aún no capturado)');
 
         const win = vistaPagina();
@@ -2175,7 +2171,7 @@
             throw new Error('jQuery no disponible en la página');
         }
 
-        const nombre = cfg.nombre || 'ValidadorDatos.CitasWeb';
+        const nombre = opts.nombre || cfg.nombre || 'ValidadorDatos.CitasWeb';
         const url = (cfg.url || 'Player.aspx/ValidadorValidar').replace(/^\//, '');
         // Formato que usa el player / monitor-dian (no JSON estricto en las claves top).
         const data =
@@ -2419,31 +2415,112 @@
         return { fechas, fechaConsultada: fechaElegida, horas, slotsRaw: slots };
     }
 
-    function citaParaAgendarPrueba(fechaIso, slot) {
+    function configDigiturno5() {
         const p2 = (CONFIG.validador && CONFIG.validador.pruebaPaso2) || {};
-        const ag = p2.agendarPrueba || {};
-        const cita = citaParaPruebaPaso2(fechaIso);
-        cita.Hora = slot.HoraAgenda || slot.horaAgenda || cita.Hora;
-        cita.IdAgenda = slot.IdentificadoresAgendas || slot.idAgenda || 0;
-        cita.UsuarioCliente = {
-            IdTipoCliente: String(p2.tipoCliente || '1'),
+        const token = String(p2.infoServicioWeb || '').trim();
+        return {
+            NumeroIntentos: 5,
+            ValidaConTipoId: false,
+            ValidaFechaNacimiento: false,
+            LimiteEdad: 0,
+            ValidaPromediosEspera: false,
+            InfoServicioWeb: token,
+            ValidaConServicioProveedores: true,
+            ModoWebPlayer: true,
+        };
+    }
+
+    // Digiturno5 Validacion: solo cédula + tipo doc. Persona viene de DIAN.
+    async function postValidacionPorDocumento(numeroDocumento, idTipoDocumento) {
+        const cfg = CONFIG.validador || {};
+        const recurso = cfg.recurso || 'CitasDIAN';
+        const doc = String(numeroDocumento || '').trim();
+        const tipoDoc = String(idTipoDocumento || '2');
+        if (!doc) throw new Error('Validacion: falta número de documento');
+
+        const token = String(
+            ((cfg.pruebaPaso2 && cfg.pruebaPaso2.infoServicioWeb) || ''),
+        ).trim();
+        if (token.length < 40) throw new Error('Validacion: falta infoServicioWeb');
+
+        return postValidadorValidar(
+            {
+                Fuente: 'Validador',
+                Encontrado: false,
+                MensajeAdicional: '',
+                ObjetosEncontrados: [doc, tipoDoc],
+                DetalleAdicional: 'Validacion',
+                Recurso: recurso,
+            },
+            {
+                nombre: 'ValidadorDatos.Digiturno5',
+                configuracion: configDigiturno5(),
+            },
+        );
+    }
+
+    function primerValorLista(v) {
+        if (Array.isArray(v) && v.length) return v[0];
+        return v;
+    }
+
+    // Mapea respuesta Validacion → UsuarioCliente (como el player tras captcha).
+    function usuarioClienteDesdeValidacion(resp, ag) {
+        const p = (resp && resp.Persona) || {};
+        const nombre =
+            (p.Nombres && String(p.Nombres).trim()) ||
+            [p.PrimerNombre, p.SegundoNombre].filter(Boolean).join(' ').trim();
+        const apellido =
+            (p.Apellidos && String(p.Apellidos).trim()) ||
+            [p.PrimerApellido, p.SegundoApellido].filter(Boolean).join(' ').trim();
+        let correo =
+            (p.Email && String(p.Email).trim()) ||
+            (p.EmailUltimo && String(p.EmailUltimo).trim()) ||
+            '';
+        if (!correo) {
+            const c0 = primerValorLista(p.CorreosElectronicos);
+            if (c0 != null) correo = String(c0).trim();
+        }
+        let celular = '';
+        const cel0 = primerValorLista(p.TelefonosCelular);
+        if (cel0 != null && cel0 !== '') celular = String(cel0);
+        else if (p.Telefono != null && p.Telefono !== '') celular = String(p.Telefono);
+        else if (p.TelefonoUltimo != null && p.TelefonoUltimo !== '') {
+            celular = String(p.TelefonoUltimo);
+        }
+        const direccion =
+            (resp && resp.Direccion && String(resp.Direccion).trim()) ||
+            (p.Direccion && String(p.Direccion).trim()) ||
+            '';
+
+        return {
+            IdTipoCliente: String(
+                ((CONFIG.validador && CONFIG.validador.pruebaPaso2) || {}).tipoCliente || '1',
+            ),
             IdTipoDocumento: String(ag.idTipoDocumento || '2'),
-            Nombre: ag.nombre || '***** ******',
-            Apellido: ag.apellido || '***** ******',
+            Nombre: nombre,
+            Apellido: apellido,
             NumeroDocumento: String(ag.numeroDocumento || ''),
-            CorreoElectronico: ag.correo || '****@****.com',
-            Celular: ag.celular || '**********',
+            CorreoElectronico: correo || null,
+            Celular: celular || null,
             Telefono: null,
-            Direccion: ag.direccion || '********************',
+            Direccion: direccion || null,
             IdCiudad: 0,
             IdEstado: 0,
             AceptaPoliticaDatos: true,
         };
+    }
+
+    function citaParaAgendarPrueba(fechaIso, slot, usuarioCliente) {
+        const cita = citaParaPruebaPaso2(fechaIso);
+        cita.Hora = slot.HoraAgenda || slot.horaAgenda || cita.Hora;
+        cita.IdAgenda = slot.IdentificadoresAgendas || slot.idAgenda || 0;
+        cita.UsuarioCliente = usuarioCliente;
         return cita;
     }
 
-    // Sandbox: Fechas→Horas→Reserva→Creo con cédula clara y PII enmascarada.
-    // Sin Validacion (Digiturno5). Devuelve { ok, codigoCita?, error?, ... }.
+    // Sandbox: Fechas→Horas→Validacion(cédula)→Reserva→Creo.
+    // PII desde Persona DIAN, no del form. Devuelve { ok, codigoCita?, error?, ... }.
     async function probarAgendarConMascaras() {
         const p2 = (CONFIG.validador && CONFIG.validador.pruebaPaso2) || {};
         const ag = p2.agendarPrueba || {};
@@ -2466,10 +2543,44 @@
         const idAgenda = slot.IdentificadoresAgendas || slot.idAgenda;
         const horaLabel = slot.Contenido || slot.contenido || slot.HoraAgenda || '';
         log(
-            `   Agendar prueba: slot ${horaLabel} IdAgenda=${idAgenda} doc=${doc} (PII máscaras, sin Validacion)`,
+            `   Agendar prueba: slot ${horaLabel} IdAgenda=${idAgenda} doc=${doc} (vía Validacion)`,
         );
 
-        const cita = citaParaAgendarPrueba(paso2.fechaConsultada, slot);
+        log('   Agendar prueba: Validacion (Digiturno5)…');
+        const rValidacion = await postValidacionPorDocumento(doc, ag.idTipoDocumento || '2');
+        if (!rValidacion.Encontrado) {
+            return {
+                ok: false,
+                paso: 'Validacion',
+                error:
+                    'Validacion Encontrado=false (' +
+                    (rValidacion.DetalleAdicional ||
+                        rValidacion.MensajeAdicional ||
+                        rValidacion.ErrorString ||
+                        '') +
+                    ')',
+                respuesta: rValidacion,
+                paso2,
+            };
+        }
+
+        const usuario = usuarioClienteDesdeValidacion(rValidacion, ag);
+        log(
+            `   Agendar prueba: Persona OK Nombre="${usuario.Nombre}" Apellido="${usuario.Apellido}" ` +
+                `correo=${usuario.CorreoElectronico || '∅'} cel=${usuario.Celular || '∅'} ` +
+                `det=${rValidacion.DetalleAdicional || ''}`,
+        );
+        if (!usuario.Nombre || !String(usuario.Nombre).trim()) {
+            return {
+                ok: false,
+                paso: 'Validacion',
+                error: 'Validacion OK pero sin Nombre en Persona',
+                respuesta: rValidacion,
+                paso2,
+            };
+        }
+
+        const cita = citaParaAgendarPrueba(paso2.fechaConsultada, slot, usuario);
         const objs = [JSON.stringify(cita), token, true];
 
         log('   Agendar prueba: manejadorReservaAgenda…');
@@ -2487,9 +2598,13 @@
                 paso: 'Reserva',
                 error:
                     'Reserva Encontrado=false (' +
-                    (rReserva.DetalleAdicional || rReserva.MensajeAdicional || rReserva.ErrorString || '') +
+                    (rReserva.DetalleAdicional ||
+                        rReserva.MensajeAdicional ||
+                        rReserva.ErrorString ||
+                        '') +
                     ')',
                 respuesta: rReserva,
+                validacion: rValidacion,
                 paso2,
             };
         }
@@ -2518,10 +2633,14 @@
                 paso: 'CreoCita',
                 error:
                     'CreoCita Encontrado=false (' +
-                    (rCreo.DetalleAdicional || rCreo.MensajeAdicional || rCreo.ErrorString || '') +
+                    (rCreo.DetalleAdicional ||
+                        rCreo.MensajeAdicional ||
+                        rCreo.ErrorString ||
+                        '') +
                     ')',
                 respuesta: rCreo,
                 reserva: rReserva,
+                validacion: rValidacion,
                 paso2,
             };
         }
@@ -2537,6 +2656,8 @@
             idInterno,
             slot: { contenido: horaLabel, idAgenda: agendaId, horaAgenda: cita.Hora },
             fecha: paso2.fechaConsultada,
+            usuario,
+            validacion: rValidacion,
             reserva: rReserva,
             creo: rCreo,
             paso2,
@@ -3385,7 +3506,7 @@
         const botonAgendarPrueba = document.createElement('button');
         botonAgendarPrueba.textContent = 'Agendar prueba';
         botonAgendarPrueba.title =
-            'Fechas→Horas→Reserva→Creo con cédula clara y resto ****. Sin Validacion. Puede crear cita real.';
+            'Fechas→Horas→Validacion(cédula)→Reserva→Creo. PII desde DIAN. Puede crear cita real.';
         botonAgendarPrueba.style.cssText = boton.style.cssText;
         const agCfg = p2Cfg.agendarPrueba || {};
         botonAgendarPrueba.style.display =
@@ -3396,8 +3517,9 @@
                 '¿Agendar prueba por POST?\n\n' +
                     'Cédula: ' +
                     doc +
-                    '\nResto de datos: máscaras ****\nSin paso Validacion.\n\n' +
-                    'Puede crear una cita REAL en DIAN si el backend acepta.',
+                    '\nFlujo: Fechas → Horas → Validacion → Reserva → Creo\n' +
+                    'Nombre/correo/etc. salen de DIAN (Validacion), no del form.\n\n' +
+                    'Puede crear una cita REAL si el backend acepta.',
             );
             if (!okConfirm) return;
             botonAgendarPrueba.disabled = true;

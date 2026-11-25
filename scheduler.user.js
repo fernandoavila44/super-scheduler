@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Super Scheduler (sandbox)
 // @namespace    super-scheduler
-// @version      2.0.1-sandbox
+// @version      2.0.2-sandbox
 // @description  [SANDBOX] Agendamiento DIAN solo por ValidadorValidar (Fechas/Horas/Reserva/Creo). Sin clics.
 // @match        https://agendamiento.dian.gov.co/*
 // @run-at       document-idle
@@ -43,6 +43,36 @@
                 'n6ch/SV/k+dI4u2UFdFZt/brXMA9zVn5kM201dC5IYv7J3PpQUXUWqySuM59vvO2Emx2PVFvYTtaJ7Rd6sSsRSlPtbn2zrNctjIsohWmnJHvHUPuBieiBA0jm0eX62xUQ+6BFWhtYjg1ePMyZSQYL79D2dZBRPWvmBFKvDrg50aJU/0Tsgpc2oALqH1hAXFJfBsx+jJJ6QvEZWmJH+3a/g==',
             direccionMascara: '********************',
             idTipoDocumento: '2',
+            // Si hay match ciudad → Id, se salta manejadorEncontroColas (4 POSTs).
+            // Si no hay match, fallback a EncontroColas.
+            usarMapaIds: true,
+            idEspecialidadPorCiudad: {
+                bogota: {
+                    id: 972,
+                    nombre:
+                        'Solicitud de devolución y/o compensación Vehículos eléctricos o Híbridos persona natural',
+                },
+                manizales: {
+                    id: 970,
+                    nombre:
+                        'Solicitud de devolución y/o compensación vehículos eléctricos o híbridos',
+                },
+                cali: {
+                    id: 976,
+                    nombre:
+                        'Solicitud de devolución y/o compensación Vehículos eléctricos o Híbridos persona natural',
+                },
+                medellin: {
+                    id: 978,
+                    nombre:
+                        'Solicitud de devolución y/o compensación Vehículos eléctricos o Híbridos persona natural',
+                },
+                bucaramanga: {
+                    id: 974,
+                    nombre:
+                        'Solicitud de devolución y/o compensación Vehículos eléctricos o Híbridos persona natural',
+                },
+            },
         },
 
         sheet: {
@@ -820,7 +850,55 @@
             .trim();
     }
 
+    /** Clave de ciudad canónica (bogota, medellin, …) desde hoja o texto libre. */
+    function claveCiudadDesdeTexto(s) {
+        const n = normalizarTextoMatch(s);
+        if (!n) return '';
+        const claves = Object.keys((CONFIG.validador && CONFIG.validador.idEspecialidadPorCiudad) || {});
+        for (let i = 0; i < claves.length; i++) {
+            const k = claves[i];
+            if (n === k || n.indexOf(k) === 0 || n.indexOf(k + ' ') >= 0) return k;
+        }
+        return '';
+    }
+
+    function colaDesdeMapaIds(cliente) {
+        const cfg = CONFIG.validador || {};
+        if (cfg.usarMapaIds === false) return null;
+        const mapa = cfg.idEspecialidadPorCiudad || {};
+        const candidatos = [];
+        const hoja = nombreHoja();
+        if (hoja) candidatos.push(hoja);
+        const preferida = textoCiudadPreferida(cliente);
+        if (preferida) candidatos.push(preferida);
+        if (Array.isArray(cliente && cliente.ciudadTramite)) {
+            for (let i = 0; i < cliente.ciudadTramite.length; i++) {
+                candidatos.push(cliente.ciudadTramite[i]);
+            }
+        }
+        for (let i = 0; i < candidatos.length; i++) {
+            const clave = claveCiudadDesdeTexto(candidatos[i]);
+            const hit = clave && mapa[clave];
+            if (hit && hit.id) {
+                return {
+                    IdEspecialidad: Number(hit.id),
+                    Nombre: hit.nombre || clave,
+                    origen: 'mapa:' + clave,
+                };
+            }
+        }
+        return null;
+    }
+
     async function resolverColaPorTramite(cliente) {
+        const desdeMapa = colaDesdeMapaIds(cliente);
+        if (desdeMapa) {
+            log(
+                `Cola desde mapa ${desdeMapa.origen} IdEspecialidad=${desdeMapa.IdEspecialidad} (sin EncontroColas)`,
+            );
+            return desdeMapa;
+        }
+
         const cfg = CONFIG.validador || {};
         const recurso = cfg.recurso || 'CitasDIAN';
         const tipo = String(cliente.tipoPersona || '1');
@@ -831,6 +909,7 @@
             ? cliente.ciudadTramite
             : [preferida];
 
+        log('Cola: sin match en mapa → EncontroColas');
         const r = await postValidadorValidar({
             Fuente: 'Validador',
             Encontrado: false,
@@ -1293,7 +1372,7 @@
                 `Cliente ${cliente.cedula} · ${cliente.nombre} ${cliente.apellido} · tipo=${cliente.tipoPersona}`,
             );
 
-            pintar('Resolviendo cola (EncontroColas)…');
+            pintar('Resolviendo cola…');
             const cola = await resolverColaPorTramite(cliente);
             log(`Cola IdEspecialidad=${cola.IdEspecialidad} · ${cola.Nombre}`);
 

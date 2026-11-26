@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Super Scheduler (sandbox)
 // @namespace    super-scheduler
-// @version      2.0.2-sandbox
+// @version      2.0.3-sandbox
 // @description  [SANDBOX] Agendamiento DIAN solo por ValidadorValidar (Fechas/Horas/Reserva/Creo). Sin clics.
 // @match        https://agendamiento.dian.gov.co/*
 // @run-at       document-idle
@@ -80,7 +80,7 @@
             url: '',
             hoja: '',
             ciudades: ['Bogota', 'Medellin', 'Cali', 'Bucaramanga', 'Manizales'],
-            colas: ['A', 'B', 'C'],
+            colas: ['A', 'B', 'C', 'D', 'E', 'F'],
             timeoutMs: 15000,
             refrescoSegundos: 60,
             edadMaximaCacheSegundos: 300,

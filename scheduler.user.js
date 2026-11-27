@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Super Scheduler (sandbox)
 // @namespace    super-scheduler
-// @version      2.0.3-sandbox
+// @version      2.0.4-sandbox
 // @description  [SANDBOX] Agendamiento DIAN solo por ValidadorValidar (Fechas/Horas/Reserva/Creo). Sin clics.
 // @match        https://agendamiento.dian.gov.co/*
 // @run-at       document-idle
@@ -26,7 +26,8 @@
 
         reintento: {
             softMaxSeguidos: 20,
-            softMaxOpciones: [10, 20, 30, 50, 100],
+            // 0 = sin tope (no recargar por soft consecutivos)
+            softMaxOpciones: [0, 10, 20, 30, 50, 100],
         },
 
         validador: {
@@ -36,7 +37,7 @@
             // Devoluciones
             categoriaCodigo: '13',
             tipoEspecialidadVirtual: '2',
-            timeoutMs: 30000,
+            timeoutMs: 60000,
             infoServicioWeb:
                 'B6gSx1jrtrvdoc4pcVdirINR7P8xoQ5IklP9PrUAsdSdu1c9ImEmjsrph3zrOh2yK2z5itWhmB4PdKiUNylhmc7QST68YbrSbB7rlug+9ObO+ffBIbtuB6cLBt8jdJ5IoNOsM3N2DO3d6foQ/uT/NaynHzR/nuKnVHbpiQLJF2t7ee5AqkYf8QgWris6up9KXNUgOiu0H7+aHT5EQhhWTlC/PK4lCMRMRfhikcGgZNnQRnnf6EKbX/nT+47aVi7X5zgKiPkFAv3EtojQIpLPLKGBT4bOeEOH8HOcUh4waXoA94sYwTh3Qy44XCCf9cPiUUDIHmAON9flWg2DxgdR+3YTV+1KF1DlKJWccbLsT8/HAZ/RQuqZe5j+68FOooIco8PpHSoWeA06qhwM/sTkwQO0U5E769EJExRnVY/lPW0PS5ijcTmy9sisHimhjEZJ',
             blobEncriptado:
@@ -151,7 +152,7 @@
 
     function softMaxSeguidos() {
         const rein = CONFIG.reintento || {};
-        const permitidos = rein.softMaxOpciones || [10, 20, 30, 50, 100];
+        const permitidos = rein.softMaxOpciones || [0, 10, 20, 30, 50, 100];
         const raw = localStorage.getItem(CLAVE_SOFT_MAX);
         if (raw === null || raw === '') {
             const def = Number(rein.softMaxSeguidos) || 20;
@@ -763,7 +764,7 @@
             JSON.stringify(respuestaBase) +
             '}';
 
-        const timeoutMs = cfg.timeoutMs || 30000;
+        const timeoutMs = cfg.timeoutMs || 60000;
         return await new Promise((resolve, reject) => {
             let listo = false;
             const timer = setTimeout(() => {
@@ -1423,8 +1424,14 @@
             }
             if (esSinCupo(e)) {
                 softSeguidos += 1;
-                log(`Sin cupo (${softSeguidos}/${softMaxSeguidos()}): ${e.message}`);
-                if (softSeguidos >= softMaxSeguidos()) {
+                const softMax = softMaxSeguidos();
+                log(
+                    softMax > 0
+                        ? `Sin cupo (${softSeguidos}/${softMax}): ${e.message}`
+                        : `Sin cupo (${softSeguidos}/∞): ${e.message}`
+                );
+                // softMax 0 = sin tope de recarga por soft consecutivos
+                if (softMax > 0 && softSeguidos >= softMax) {
                     softSeguidos = 0;
                     recargarInicio('soft máx sin cupo');
                     return;
@@ -1433,8 +1440,10 @@
                 return;
             }
             softSeguidos += 1;
+            const softMax = softMaxSeguidos();
             log(`Error ciclo (${softSeguidos}): ${(e && e.message) || e}`);
-            if (softSeguidos >= softMaxSeguidos()) {
+            // softMax 0 = sin tope de recarga por soft consecutivos
+            if (softMax > 0 && softSeguidos >= softMax) {
                 softSeguidos = 0;
                 recargarInicio('soft máx error');
                 return;
@@ -1597,14 +1606,17 @@
         const selectSoftMax = document.createElement('select');
         selectSoftMax.style.cssText = estiloBtn + ';max-width:110px';
         for (const n of (CONFIG.reintento && CONFIG.reintento.softMaxOpciones) || [
-            10, 20, 30, 50, 100,
+            0, 10, 20, 30, 50, 100,
         ]) {
-            selectSoftMax.appendChild(new Option(`Soft ${n}`, String(n)));
+            selectSoftMax.appendChild(
+                new Option(n === 0 ? 'Soft 0 (off)' : `Soft ${n}`, String(n))
+            );
         }
         selectSoftMax.value = String(softMaxSeguidos());
         selectSoftMax.onchange = () => {
             localStorage.setItem(CLAVE_SOFT_MAX, selectSoftMax.value);
-            pintar(`Soft máx: ${selectSoftMax.value}`);
+            const v = Number(selectSoftMax.value);
+            pintar(v === 0 ? 'Soft máx: off (sin tope)' : `Soft máx: ${selectSoftMax.value}`);
         };
 
         refrescarBoton = () => {
